@@ -23,7 +23,7 @@ from standalone_crosslisting_tool import (
     CanvasAPIError, resolve_instructor, list_user_term_courses_via_enrollments,
     list_account_courses_filtered, list_sections_for_courses,
     format_sections_for_ui, cross_list_section, un_cross_list_section,
-        check_course_permissions, OAuthTokenProvider, extract_course_number,
+        check_course_permissions, EnvTokenProvider, extract_course_number,
     export_sections_to_csv, get_section, summarize_crosslist_changes
 )
 from standalone_crosslisting_tool import is_sandbox_course_name
@@ -908,7 +908,7 @@ class CrosslistingGUI:
         """Load Canvas API configuration."""
         try:
             self.config = get_config()
-            self.token_provider = OAuthTokenProvider()
+            self.token_provider = EnvTokenProvider()
             self.service = CrosslistingService(self.config, self.token_provider, self.as_user_id)
             self.status_var.set("Configuration loaded successfully")
         except Exception as e:
