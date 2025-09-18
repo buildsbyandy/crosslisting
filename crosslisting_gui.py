@@ -23,7 +23,7 @@ from standalone_crosslisting_tool import (
     list_account_courses_filtered, list_sections_for_courses,
     format_sections_for_ui, cross_list_section, un_cross_list_section,
     check_course_permissions, EnvTokenProvider, extract_course_number,
-    export_sections_to_csv, get_section
+    export_sections_to_csv, get_section, summarize_crosslist_changes
 )
 
 
@@ -437,6 +437,7 @@ class CrosslistingGUI:
         self.dry_run = tk.BooleanVar()
         self.bypass_cache = tk.BooleanVar()
         self.as_user_id = None
+        self.override_sis_stickiness = tk.BooleanVar(value=True)
         
         # Section selection
         self.parent_var = tk.StringVar()
@@ -647,6 +648,12 @@ class CrosslistingGUI:
             options_frame,
             text="Bypass cache",
             variable=self.bypass_cache
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Checkbutton(
+            options_frame,
+            text="Override SIS stickiness (staff/admin)",
+            variable=self.override_sis_stickiness
         ).pack(side=tk.LEFT, padx=(0, 10))
 
         self.staff_info_label = ttk.Label(options_frame, text="", foreground="blue", font=('Arial', 9))
@@ -1536,13 +1543,27 @@ class CrosslistingGUI:
                     term_id=self.selected_term_id,
                     instructor_id=instructor_id,
                     as_user_id=self.as_user_id,
-                    override_sis_stickiness=True
+                    override_sis_stickiness=self.override_sis_stickiness.get()
                 )
+
+                details_text = ""
+                if not self.dry_run.get() and success:
+                    try:
+                        summary = summarize_crosslist_changes(self.config, self.token_provider, parent_section['course_id'], self.as_user_id)
+                        new_title = summary.get('parent_course_name')
+                        children = summary.get('children', [])
+                        if new_title:
+                            details_text += f"\nNew Course Title: {new_title}"
+                        if children:
+                            details_text += "\nChild Courses:" + "\n" + "\n".join([f"  • {code}: {name}" for code, name in children])
+                    except Exception:
+                        pass
 
                 if self.dry_run.get():
                     message = f"DRY RUN: Would cross-list section {child_section['section_id']} into course {parent_section['course_id']}"
                 else:
-                    message = f"Successfully cross-listed section {child_section['section_id']} into course {parent_section['course_id']}"
+                    base_msg = f"Successfully cross-listed section {child_section['section_id']} into course {parent_section['course_id']}"
+                    message = base_msg + (details_text if details_text else "")
                 
                 if not self._is_closing:
                     self.root.after(0, self.handle_crosslist_result, success, message, self.dry_run.get())

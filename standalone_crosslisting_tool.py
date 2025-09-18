@@ -96,6 +96,8 @@ class CanvasConfig:
     require_parent_unpublished: bool = True
     forbid_parent_with_students: bool = True
     enforce_same_subaccount: bool = False
+    enforce_same_term: bool = True
+    default_override_sis_stickiness: bool = True
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -392,6 +394,22 @@ def get_section(config: CanvasConfig, token_provider: TokenProvider, section_id:
     return client._make_request('GET', f'/api/v1/sections/{section_id}')
 
 
+def get_course(config: CanvasConfig, token_provider: TokenProvider, course_id: int, include: Optional[List[str]] = None,
+               as_user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Fetch a single course by id from Canvas."""
+    client = CanvasAPIClient(token_provider, config, as_user_id)
+    params = {"include[]": include} if include else None
+    return client._make_request('GET', f'/api/v1/courses/{course_id}', params)
+
+
+def update_course_fields(config: CanvasConfig, token_provider: TokenProvider, course_id: int,
+                         fields: Dict[str, Any], as_user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Update course fields (e.g., name, syllabus_body)."""
+    client = CanvasAPIClient(token_provider, config, as_user_id)
+    data = {"course": fields}
+    return client._make_request('PUT', f'/api/v1/courses/{course_id}', data=data)
+
+
 def get_config() -> CanvasConfig:
     """Get Canvas API configuration from environment variables."""
     api_token = os.getenv('CANVAS_API_TOKEN')
@@ -432,6 +450,8 @@ def get_config() -> CanvasConfig:
     require_parent_unpublished = os.getenv('REQUIRE_PARENT_UNPUBLISHED', 'true').lower() == 'true'
     forbid_parent_with_students = os.getenv('FORBID_PARENT_WITH_STUDENTS', 'true').lower() == 'true'
     enforce_same_subaccount = os.getenv('ENFORCE_SAME_SUBACCOUNT', 'false').lower() == 'true'
+    enforce_same_term = os.getenv('ENFORCE_SAME_TERM', 'true').lower() == 'true'
+    default_override_sis_stickiness = os.getenv('DEFAULT_OVERRIDE_SIS_STICKINESS', 'true').lower() == 'true'
 
     return CanvasConfig(
         api_token=api_token,
@@ -445,6 +465,9 @@ def get_config() -> CanvasConfig:
         require_parent_unpublished=require_parent_unpublished,
         forbid_parent_with_students=forbid_parent_with_students,
         enforce_same_subaccount=enforce_same_subaccount
+        ,
+        enforce_same_term=enforce_same_term,
+        default_override_sis_stickiness=default_override_sis_stickiness
     )
 
 
@@ -718,6 +741,7 @@ def list_sections_for_courses(config: CanvasConfig, token_provider: TokenProvide
                 "course_id": cid,
                 "course_name": course.get("name"),
                 "course_code": course.get("course_code"),
+                "enrollment_term_id": course.get("enrollment_term_id"),
                 "sis_course_id": course.get("sis_course_id"),
                 "sis_section_id": s.get("sis_section_id"),
                 "workflow_state": course.get("workflow_state"),
@@ -863,6 +887,13 @@ def validate_cross_listing_candidates(config: CanvasConfig, parent_section: Dict
     if parent_number and child_number and parent_number != child_number:
         errors.append(f"Course numbers don't match: {parent_number} vs {child_number}")
 
+    # Same term required
+    if config.enforce_same_term:
+        parent_term = parent_section.get('enrollment_term_id')
+        child_term = child_section.get('enrollment_term_id')
+        if parent_term is not None and child_term is not None and parent_term != child_term:
+            errors.append("Parent and child must be in the same enrollment term")
+
     # Same subaccount check
     if config.enforce_same_subaccount:
         parent_subaccount = parent_section.get('subaccount_id')
@@ -875,7 +906,10 @@ def validate_cross_listing_candidates(config: CanvasConfig, parent_section: Dict
 
 def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_id: Optional[int],
                     action: str, parent_course_id: Optional[int], child_section_id: Optional[int],
-                    result: str, dry_run: bool, message: str) -> None:
+                    result: str, dry_run: bool, message: str,
+                    new_parent_course_title: Optional[str] = None,
+                    child_section_ids: Optional[List[int]] = None,
+                    syllabus_updated: Optional[bool] = None) -> None:
     """Log action to audit CSV."""
     audit_dir = Path('./logs')
     audit_dir.mkdir(exist_ok=True)
@@ -887,7 +921,8 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
     try:
         with open(audit_file, 'a', newline='', encoding='utf-8') as f:
             fieldnames = ['timestamp', 'actor_as_user_id', 'term_id', 'instructor_id', 'action',
-                         'parent_course_id', 'child_section_id', 'result', 'dry_run', 'message']
+                         'parent_course_id', 'child_section_id', 'result', 'dry_run', 'message',
+                         'new_parent_course_title', 'child_section_ids', 'syllabus_updated']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 
             if not file_exists:
@@ -903,7 +938,10 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
                 'child_section_id': child_section_id or '',
                 'result': result,
                 'dry_run': 'Yes' if dry_run else 'No',
-                'message': message
+                'message': message,
+                'new_parent_course_title': new_parent_course_title or '',
+                'child_section_ids': ",".join(str(i) for i in (child_section_ids or [])),
+                'syllabus_updated': '' if syllabus_updated is None else ('Yes' if syllabus_updated else 'No')
             })
     except IOError as e:
         logger.warning(f"Failed to write audit log: {e}")
@@ -911,7 +949,7 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
 
 def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, child_section_id: int, parent_course_id: int,
                       dry_run: bool = False, term_id: Optional[int] = None, instructor_id: Optional[int] = None,
-                      as_user_id: Optional[int] = None, override_sis_stickiness: bool = True) -> bool:
+                      as_user_id: Optional[int] = None, override_sis_stickiness: Optional[bool] = None) -> bool:
     """Cross-list a child section into a parent course."""
     action = "cross_list"
 
@@ -926,6 +964,26 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
 
     current_course_id = pre_section.get('course_id')
     original_course_id = pre_section.get('nonxlist_course_id')
+
+    # Enforce same-term safety if configured (fetch child and parent course terms)
+    try:
+        parent_course = get_course(config, token_provider, parent_course_id, include=None, as_user_id=as_user_id)
+        child_course = get_course(config, token_provider, current_course_id, include=None, as_user_id=as_user_id)
+        parent_term_id = parent_course.get('enrollment_term_id')
+        child_term_id = child_course.get('enrollment_term_id')
+        if config.enforce_same_term and parent_term_id is not None and child_term_id is not None and parent_term_id != child_term_id:
+            message = (
+                f"Term mismatch: parent course term {parent_term_id} vs child course term {child_term_id}. "
+                f"Cross-listing blocked."
+            )
+            logger.error(message)
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message)
+            return False
+    except CanvasAPIError as e:
+        message = f"Failed to fetch course details for term check: {e.message}"
+        logger.error(message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message)
+        return False
 
     # No-op if already in the target parent course
     if current_course_id == parent_course_id:
@@ -953,7 +1011,8 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
 
     try:
         path = f"/api/v1/sections/{child_section_id}/crosslist/{parent_course_id}"
-        params = {"override_sis_stickiness": str(override_sis_stickiness).lower()} if override_sis_stickiness else None
+        effective_override = config.default_override_sis_stickiness if override_sis_stickiness is None else override_sis_stickiness
+        params = {"override_sis_stickiness": str(effective_override).lower()} if effective_override else None
 
         print(f"🔄 Cross-listing section {child_section_id} into course {parent_course_id}...")
         _ = client._make_request('POST', path, params=params)
@@ -961,9 +1020,23 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
         # Post-move verification
         post_section = get_section(config, token_provider, child_section_id, as_user_id)
         if post_section.get('course_id') == parent_course_id:
+            # Apply post-success updates: rename course per Option C and update syllabus child listing
+            try:
+                updates = apply_post_crosslist_updates(config, token_provider, parent_course_id, as_user_id)
+            except Exception as _:
+                updates = {"new_course_name": None, "child_section_ids": [], "syllabus_updated": False}
+
             message = f"Successfully cross-listed section {child_section_id} into course {parent_course_id}"
+            if updates.get('new_course_name'):
+                message += f"; new course name: {updates['new_course_name']}"
             print(f"✅ {message}")
-            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", False, message)
+            log_audit_action(
+                as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id,
+                "success", False, message,
+                new_parent_course_title=updates.get('new_course_name'),
+                child_section_ids=updates.get('child_section_ids') or [],
+                syllabus_updated=updates.get('syllabus_updated')
+            )
             return True
         else:
             message = (
@@ -978,6 +1051,193 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
         logger.error(message)
         log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message)
         return False
+
+
+def _extract_section_suffix(sis_section_id: Optional[str], section_name: Optional[str]) -> str:
+    """Extract section suffix using preferred identifiers.
+    - Prefer sis_section_id when available
+    - Otherwise parse from section name
+    - Support alphanumeric endings (e.g., A, 007); normalize to upper-case
+    """
+    # Helper to normalize and extract trailing alphanumeric group up to 5 chars
+    def _extract_from_text(text: str) -> Optional[str]:
+        if not text:
+            return None
+        text_u = str(text).upper().strip()
+        # Try common separators first (last token after non-alnum separators)
+        m = re.search(r'[^0-9A-Z]([0-9A-Z]{1,5})$', text_u)
+        if m:
+            return m.group(1)
+        # Fallback: pure trailing alnum
+        m2 = re.search(r'([0-9A-Z]{1,5})$', text_u)
+        return m2.group(1) if m2 else None
+
+    # Prefer SIS section id
+    suffix = _extract_from_text(sis_section_id or '') if sis_section_id else None
+    if suffix:
+        return suffix
+    # Fallback to section name
+    suffix = _extract_from_text(section_name or '') if section_name else None
+    return suffix or ''
+
+
+def _build_option_c_course_name(base_course_code: str, existing_course_name: str, parent_primary_suffix: str, child_suffixes: List[str]) -> str:
+    """Compose course name per Option C: <parent_suffix>/<child_suffixes>: <parent_course_name> prefixed by base course code.
+    - Only the primary parent section suffix is included for parent
+    - Include all child suffixes
+    """
+    # Determine course code prefix (before last '-')
+    prefix = base_course_code or ''
+    if '-' in prefix:
+        maybe_prefix, maybe_suffix = prefix.rsplit('-', 1)
+        if re.fullmatch(r'[0-9A-Z]{1,5}', (maybe_suffix or '').upper()):
+            prefix = maybe_prefix
+
+    parts: List[str] = []
+    if parent_primary_suffix:
+        parts.append(parent_primary_suffix.upper())
+    # Deduplicate child suffixes and exclude if same as parent
+    child_list = [c.upper() for c in child_suffixes if c]
+    child_list = sorted({c for c in child_list if c != (parent_primary_suffix or '').upper()})
+    parts.extend(child_list)
+
+    code_part = f"{prefix}-{('/'.join(parts))}" if parts else prefix
+    return f"{code_part}: {existing_course_name}" if code_part else existing_course_name
+
+
+def _build_children_html_list(children: List[Tuple[str, str]]) -> str:
+    """Build the delimited block with <ul> for child courses. children: list of (course_code, name).
+    The returned string includes only the markers and the <ul> content, per requirements.
+    """
+    items = "\n".join([f"  <li>Child Course – {code}: {name}</li>" for code, name in children])
+    return (
+        "<!-- CROSSLIST_CHILDREN -->\n"
+        f"<ul>\n{items}\n</ul>\n"
+        "<!-- END_CROSSLIST_CHILDREN -->"
+    )
+
+
+def apply_post_crosslist_updates(config: CanvasConfig, token_provider: TokenProvider, parent_course_id: int,
+                                 as_user_id: Optional[int] = None,
+                                 primary_parent_suffix: Optional[str] = None) -> Dict[str, Any]:
+    """
+    After a successful cross-list, update parent course name (Option C) and syllabus child list block.
+    Returns dict with new_course_name, child_section_ids, syllabus_updated.
+    """
+    client = CanvasAPIClient(token_provider, config, as_user_id)
+
+    # Fetch parent course details (need name, course_code, term, syllabus)
+    parent_course = get_course(config, token_provider, parent_course_id, include=["syllabus_body"], as_user_id=as_user_id)
+    parent_course_name = parent_course.get('name') or ''
+    parent_course_code = parent_course.get('course_code') or ''
+    current_syllabus = parent_course.get('syllabus_body') or ''
+
+    # Extract stored primary suffix marker if present
+    primary_marker_re = re.compile(r"<!--\s*CROSSLIST_PRIMARY_SUFFIX:\s*([0-9A-Z]{1,5})\s*-->")
+    stored_primary_suffix: Optional[str] = None
+    m = primary_marker_re.search(current_syllabus)
+    if m:
+        stored_primary_suffix = m.group(1).upper()
+
+    # Fetch all sections currently in the parent course
+    sections = client.get_paginated_data(f"/api/v1/courses/{parent_course_id}/sections", {"per_page": config.per_page})
+
+    parent_candidates: List[Dict[str, Any]] = []
+    child_sections: List[Dict[str, Any]] = []
+    child_section_ids: List[int] = []
+    child_origin_course_ids: List[int] = []
+
+    for s in sections or []:
+        nonx = s.get('nonxlist_course_id')
+        if nonx is None or nonx == parent_course_id:
+            parent_candidates.append(s)
+        else:
+            child_sections.append(s)
+            child_section_ids.append(s.get('id'))
+            if nonx:
+                child_origin_course_ids.append(nonx)
+
+    # Decide primary parent suffix per rules: stored > provided > fallback native first
+    parent_primary_suffix = (stored_primary_suffix or (primary_parent_suffix.upper() if primary_parent_suffix else ''))
+    if not parent_primary_suffix and parent_candidates:
+        primary = sorted(parent_candidates, key=lambda x: (x.get('id') or 0))[0]
+        parent_primary_suffix = _extract_section_suffix(primary.get('sis_section_id'), primary.get('name')).upper()
+
+    # Build child suffix list
+    child_suffixes: List[str] = []
+    for s in child_sections:
+        child_suffixes.append(_extract_section_suffix(s.get('sis_section_id'), s.get('name')))
+
+    # Build new course name
+    new_course_name = _build_option_c_course_name(parent_course_code, parent_course_name, parent_primary_suffix, child_suffixes)
+
+    # Update course name if changed
+    if new_course_name and new_course_name != parent_course_name:
+        update_course_fields(config, token_provider, parent_course_id, {"name": new_course_name}, as_user_id)
+
+    # Build syllabus children list (fetch child origin course details)
+    children_display: List[Tuple[str, str]] = []
+    for ocid in sorted({cid for cid in child_origin_course_ids if cid}):
+        try:
+            child_course = get_course(config, token_provider, ocid, include=None, as_user_id=as_user_id)
+            code = child_course.get('course_code') or ''
+            name = child_course.get('name') or ''
+            children_display.append((code, name))
+        except CanvasAPIError:
+            continue
+
+    # Prepare syllabus block
+    html_block = _build_children_html_list(children_display)
+    header_block = "<hr>\n<h3>Cross-listed Child Courses</h3>\n"
+
+    # Replace existing block between markers if present, else append header + block and persist primary marker
+    start_marker = "<!-- CROSSLIST_CHILDREN -->"
+    end_marker = "<!-- END_CROSSLIST_CHILDREN -->"
+    syllabus_updated = False
+    if start_marker in current_syllabus and end_marker in current_syllabus:
+        pattern = re.compile(r"<!-- CROSSLIST_CHILDREN -->[\s\S]*?<!-- END_CROSSLIST_CHILDREN -->", re.MULTILINE)
+        new_syllabus = pattern.sub(html_block, current_syllabus)
+        if new_syllabus != current_syllabus:
+            update_course_fields(config, token_provider, parent_course_id, {"syllabus_body": new_syllabus}, as_user_id)
+            syllabus_updated = True
+    else:
+        sep = "\n\n" if current_syllabus and not current_syllabus.endswith("\n") else "\n"
+        primary_marker_str = f"<!-- CROSSLIST_PRIMARY_SUFFIX: {parent_primary_suffix} -->\n" if parent_primary_suffix else ""
+        new_syllabus = (current_syllabus or '') + sep + primary_marker_str + header_block + html_block
+        update_course_fields(config, token_provider, parent_course_id, {"syllabus_body": new_syllabus}, as_user_id)
+        syllabus_updated = True
+
+    return {
+        "new_course_name": new_course_name,
+        "child_section_ids": child_section_ids,
+        "syllabus_updated": syllabus_updated
+    }
+
+
+def summarize_crosslist_changes(config: CanvasConfig, token_provider: TokenProvider, parent_course_id: int,
+                                as_user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Fetch current parent course name and a list of child courses for GUI display (no updates)."""
+    client = CanvasAPIClient(token_provider, config, as_user_id)
+    parent_course = get_course(config, token_provider, parent_course_id, include=None, as_user_id=as_user_id)
+    sections = client.get_paginated_data(f"/api/v1/courses/{parent_course_id}/sections", {"per_page": config.per_page})
+    child_origin_course_ids: List[int] = []
+    for s in sections or []:
+        nonx = s.get('nonxlist_course_id')
+        if nonx is not None and nonx != parent_course_id:
+            child_origin_course_ids.append(nonx)
+    children_display: List[Tuple[str, str]] = []
+    for ocid in sorted({cid for cid in child_origin_course_ids if cid}):
+        try:
+            child_course = get_course(config, token_provider, ocid, include=None, as_user_id=as_user_id)
+            code = child_course.get('course_code') or ''
+            name = child_course.get('name') or ''
+            children_display.append((code, name))
+        except CanvasAPIError:
+            continue
+    return {
+        "parent_course_name": parent_course.get('name') or '',
+        "children": children_display
+    }
 
 
 def un_cross_list_section(config: CanvasConfig, token_provider: TokenProvider, section_id: int,
