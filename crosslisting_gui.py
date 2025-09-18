@@ -24,9 +24,9 @@ from standalone_crosslisting_tool import (
     list_account_courses_filtered, list_sections_for_courses,
     format_sections_for_ui, cross_list_section, un_cross_list_section,
         check_course_permissions, EnvTokenProvider, extract_course_number,
-    export_sections_to_csv, get_section, summarize_crosslist_changes
+    export_sections_to_csv, get_section, summarize_crosslist_changes,
+    get_course_prefix
 )
-from standalone_crosslisting_tool import is_sandbox_course_name
 
 
 class AboutCrosslistingWindow:
@@ -216,6 +216,212 @@ class InstructorSelectionDialog:
         """Show the dialog and return result."""
         self.dialog.wait_window()
         return self.result
+
+
+class WarningConfirmDialog:
+    """Warning confirmation dialog for cross-listing operations with warnings."""
+
+    def __init__(self, parent, warnings, parent_section, child_section):
+        self.parent = parent
+        self.warnings = warnings
+        self.parent_section = parent_section
+        self.child_section = child_section
+        self.result = False
+        self.create_dialog()
+
+    def create_dialog(self):
+        """Create the warning confirmation dialog."""
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("Cross-listing Warnings")
+        self.dialog.geometry("600x400")
+        self.dialog.resizable(False, False)
+
+        # Make it modal
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        # Main frame
+        main_frame = ttk.Frame(self.dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Check if this is specifically a course name mismatch
+        has_name_mismatch = any("Course name mismatch" in warning for warning in self.warnings)
+        has_teacher_mismatch = any("Teachers do not match" in warning for warning in self.warnings)
+        has_subaccount_mismatch = any("Subaccounts don't match" in warning for warning in self.warnings)
+        has_student_activity = any("published and has student activity" in warning for warning in self.warnings)
+
+        if has_name_mismatch:
+            # Special handling for course name mismatch
+            title_label = ttk.Label(
+                main_frame,
+                text="Course Name Mismatch Warning",
+                font=('Arial', 14, 'bold'),
+                foreground="orange"
+            )
+            title_label.pack(pady=(0, 15))
+
+            parent_name = self.parent_section.get('course_name', '')
+            child_name = self.child_section.get('course_name', '')
+
+            message_text = f"""You have selected a child course that does not match in name.
+
+Parent: {parent_name}
+Child: {child_name}
+
+If you intend to do this, click Yes to continue. Otherwise, click No to cancel."""
+
+            message_label = ttk.Label(
+                main_frame,
+                text=message_text,
+                font=('Arial', 11),
+                justify=tk.LEFT
+            )
+            message_label.pack(pady=(0, 20))
+
+        else:
+            # Generic warning dialog
+            title_label = ttk.Label(
+                main_frame,
+                text="Cross-listing Warnings Detected",
+                font=('Arial', 14, 'bold'),
+                foreground="orange"
+            )
+            title_label.pack(pady=(0, 15))
+
+            if has_teacher_mismatch:
+                warning_text = "The courses do not have matching teachers."
+            elif has_subaccount_mismatch:
+                warning_text = "The courses are in different subaccounts."
+            elif has_student_activity:
+                warning_text = "The parent course is published and has student activity."
+            else:
+                warning_text = "The following warnings were detected:"
+
+            message_label = ttk.Label(
+                main_frame,
+                text=warning_text,
+                font=('Arial', 11),
+                justify=tk.LEFT
+            )
+            message_label.pack(pady=(0, 10))
+
+            # Show all warnings
+            if not (has_teacher_mismatch or has_subaccount_mismatch or has_student_activity):
+                for warning in self.warnings:
+                    warning_label = ttk.Label(
+                        main_frame,
+                        text=f"• {warning}",
+                        font=('Arial', 10),
+                        foreground="red"
+                    )
+                    warning_label.pack(anchor=tk.W, padx=(20, 0), pady=2)
+
+            question_label = ttk.Label(
+                main_frame,
+                text="\nDo you want to proceed with cross-listing anyway?",
+                font=('Arial', 11, 'bold')
+            )
+            question_label.pack(pady=(20, 20))
+
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+
+        no_btn = ttk.Button(
+            button_frame,
+            text="No - Cancel",
+            command=self.cancel
+        )
+        no_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
+        yes_btn = ttk.Button(
+            button_frame,
+            text="Yes - Continue",
+            command=self.confirm
+        )
+        yes_btn.pack(side=tk.RIGHT)
+
+        # Center the dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (600 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (400 // 2)
+        self.dialog.geometry(f"600x400+{x}+{y}")
+
+    def confirm(self):
+        """Handle confirm button click."""
+        self.result = True
+        self.dialog.destroy()
+
+    def cancel(self):
+        """Handle cancel button click."""
+        self.result = False
+        self.dialog.destroy()
+
+    def show(self):
+        """Show the dialog and return result."""
+        self.dialog.wait_window()
+        return self.result
+
+
+class MultipleChildWarningDialog:
+    """Warning dialog for multiple child selection attempts."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.create_dialog()
+
+    def create_dialog(self):
+        """Create the multiple child warning dialog."""
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("Multiple Cross-listing Not Allowed")
+        self.dialog.geometry("500x200")
+        self.dialog.resizable(False, False)
+
+        # Make it modal
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        # Main frame
+        main_frame = ttk.Frame(self.dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        title_label = ttk.Label(
+            main_frame,
+            text="Multiple Cross-listing Requires Approval",
+            font=('Arial', 14, 'bold'),
+            foreground="red"
+        )
+        title_label.pack(pady=(0, 15))
+
+        message_text = """Cross-listing 2+ courses for a single course requires approval.
+
+Please reach out to the eLC for assistance with multiple course cross-listing."""
+
+        message_label = ttk.Label(
+            main_frame,
+            text=message_text,
+            font=('Arial', 11),
+            justify=tk.CENTER
+        )
+        message_label.pack(pady=(0, 20))
+
+        # OK Button
+        ok_btn = ttk.Button(
+            main_frame,
+            text="OK",
+            command=self.dialog.destroy
+        )
+        ok_btn.pack()
+
+        # Center the dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (500 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (200 // 2)
+        self.dialog.geometry(f"500x200+{x}+{y}")
+
+    def show(self):
+        """Show the dialog."""
+        self.dialog.wait_window()
 
 
 class CrosslistingConfirmDialog:
@@ -475,6 +681,7 @@ class CrosslistingGUI:
         # Section selection
         self.parent_var = tk.StringVar()
         self.child_var = tk.StringVar()
+        self.selected_children = set()  # Track multiple child selections
         
         # Setup proper cleanup
         self.setup_cleanup_handlers()
@@ -1471,11 +1678,6 @@ class CrosslistingGUI:
             can_be_child = ui_row.get('child_candidate', False)
             permission_block = ui_row.get('permission_block')
 
-            # Sandbox dry-run bypass: allow parent even if Canvas denied permissions
-            is_sandbox = is_sandbox_course_name(section.get('course_name', ''))
-            if is_sandbox and self.dry_run.get() and permission_block:
-                permission_block = None  # Clear permission block for sandbox in dry run mode
-
             # Create parent radio (disabled if permission blocked)
             parent_radio = '○' if can_be_parent and not permission_block else ''
             if permission_block:
@@ -1517,10 +1719,11 @@ class CrosslistingGUI:
         """Clear the sections table."""
         for item in self.tree.get_children():
             self.tree.delete(item)
-        
+
         # Reset selections
         self.parent_var.set('')
         self.child_var.set('')
+        self.selected_children.clear()
         self.update_button_states()
     
     def on_tree_click(self, event):
@@ -1545,11 +1748,6 @@ class CrosslistingGUI:
         if column == '#1':  # Parent column
             ui_row = self.ui_rows[section_index] if section_index < len(self.ui_rows) else {}
             permission_block = ui_row.get('permission_block')
-
-            # Sandbox dry-run bypass: allow parent even if Canvas denied permissions
-            is_sandbox = is_sandbox_course_name(section.get('course_name', ''))
-            if is_sandbox and self.dry_run.get() and permission_block:
-                permission_block = None  # Clear permission block for sandbox in dry run mode
 
             if permission_block:
                 messagebox.showwarning("Permission Denied", permission_block)
@@ -1585,11 +1783,6 @@ class CrosslistingGUI:
                 ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
                 permission_block = ui_row.get('permission_block')
 
-                # Sandbox dry-run bypass: allow parent even if Canvas denied permissions
-                is_sandbox = is_sandbox_course_name(self.sections[i].get('course_name', ''))
-                if is_sandbox and self.dry_run.get() and permission_block:
-                    permission_block = None  # Clear permission block for sandbox in dry run mode
-
                 if permission_block:
                     self.tree.set(item, 'parent', '🚫')
                 elif ui_row.get('parent_candidate', False):
@@ -1599,6 +1792,7 @@ class CrosslistingGUI:
 
         # Reset child selection when parent changes
         self.child_var.set('')
+        self.selected_children.clear()
 
         # Update child options based on parent selection
         self.update_child_options()
@@ -1614,114 +1808,95 @@ class CrosslistingGUI:
         parent_section = self.sections[parent_index]
         child_section = self.sections[section_index]
 
-        # Sandbox detection: relax course number mismatch constraint but warn
-        parent_is_sandbox = is_sandbox_course_name(parent_section.get('course_name', ''))
-        child_is_sandbox = is_sandbox_course_name(child_section.get('course_name', ''))
-        sandbox_active = parent_is_sandbox or child_is_sandbox
-
-        # Validate course match using course number grouping
-        parent_course_num = extract_course_number(parent_section.get('course_code', ''))
-        child_course_num = extract_course_number(child_section.get('course_code', ''))
-
-        # Show sandbox banner if applicable
-        if sandbox_active:
-            self.show_sandbox_banner()
-
-        if parent_course_num != child_course_num:
-            if sandbox_active:
-                self.show_sandbox_banner()
-            else:
-                messagebox.showwarning(
-                    "Course Number Mismatch",
-                    f"Course numbers must match:\nParent: {parent_course_num}\nChild: {child_course_num}"
-                )
+        # Check for multiple child selection attempt
+        if section_index in self.selected_children:
+            # Deselect if already selected
+            self.selected_children.remove(section_index)
+        else:
+            # Check if this would be a second child
+            if len(self.selected_children) >= 1:
+                dialog = MultipleChildWarningDialog(self.root)
+                dialog.show()
                 return
 
-        # Clear all child selections
+            # Add to selected children
+            self.selected_children.add(section_index)
+
+        # Validate course match using course prefix comparison
+        parent_section = self.sections[parent_index]
+        parent_code = parent_section.get('course_code', '')
+        child_code = child_section.get('course_code', '')
+        parent_prefix = get_course_prefix(parent_code)
+        child_prefix = get_course_prefix(child_code)
+
+        # Only warn if different prefixes (not same prefix like MATH vs MATH)
+        if parent_prefix != child_prefix:
+            # This will be handled by the warning system, but we can proceed with selection
+            pass
+
+        # Update child selection display
         for i, item in enumerate(self.tree.get_children()):
-            if i == section_index:
+            if i in self.selected_children:
                 self.tree.set(item, 'child', '●')
-                self.child_var.set(str(section_index))
             else:
-                # Show valid child options based on course number match
+                # Show valid child options
                 ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
-                section_course_num = extract_course_number(self.sections[i].get('course_code', ''))
+                parent_course_prefix = get_course_prefix(parent_section.get('course_code', ''))
+                section_course_prefix = get_course_prefix(self.sections[i].get('course_code', ''))
 
                 if (ui_row.get('child_candidate', False) and
-                    section_course_num == parent_course_num and i != parent_index):
+                    section_course_prefix == parent_course_prefix and i != parent_index):
                     self.tree.set(item, 'child', '○')
                 else:
                     self.tree.set(item, 'child', '')
 
+        # Update child_var for backward compatibility (use first selected child)
+        if self.selected_children:
+            self.child_var.set(str(list(self.selected_children)[0]))
+        else:
+            self.child_var.set('')
+
         self.update_button_states()
     
     def update_child_options(self):
-        """Update available child options based on parent selection and course number grouping."""
+        """Update available child options based on parent selection and course prefix matching."""
         parent_index = self.get_parent_index()
 
         if parent_index is not None:
             parent_section = self.sections[parent_index]
-            parent_is_sandbox = is_sandbox_course_name(parent_section.get('course_name', ''))
-            parent_course_num = extract_course_number(parent_section.get('course_code', ''))
-
-            if parent_is_sandbox:
-                self.show_sandbox_banner()
+            parent_course_prefix = get_course_prefix(parent_section.get('course_code', ''))
 
             for i, item in enumerate(self.tree.get_children()):
                 if i == parent_index:
                     # Don't show child option for parent
                     self.tree.set(item, 'child', '')
+                elif i in self.selected_children:
+                    # Keep selected children marked
+                    self.tree.set(item, 'child', '●')
                 else:
                     ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
-                    section_course_num = extract_course_number(self.sections[i].get('course_code', ''))
+                    section_course_prefix = get_course_prefix(self.sections[i].get('course_code', ''))
 
-                    # Sandbox dry-run bypass: allow children pairing if parent is sandbox AND dry run is true
+                    # Can be child if: child candidate and course prefixes match
                     can_be_child = ui_row.get('child_candidate', False)
-                    course_numbers_match = section_course_num == parent_course_num
-                    sandbox_dryrun_bypass = parent_is_sandbox and self.dry_run.get()
+                    course_prefixes_match = section_course_prefix == parent_course_prefix
 
-                    # Can be child if: child candidate and (course numbers match OR sandbox+dry_run bypass)
-                    if can_be_child and (course_numbers_match or sandbox_dryrun_bypass):
+                    if can_be_child and course_prefixes_match:
                         self.tree.set(item, 'child', '○')
                     else:
-                        # Show tooltip reason if course numbers don't match
                         self.tree.set(item, 'child', '')
         else:
             # No parent selected, show all potential children
             for i, item in enumerate(self.tree.get_children()):
-                ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
-                if ui_row.get('child_candidate', False):
-                    self.tree.set(item, 'child', '○')
+                if i in self.selected_children:
+                    self.tree.set(item, 'child', '●')
                 else:
-                    self.tree.set(item, 'child', '')
+                    ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
+                    if ui_row.get('child_candidate', False):
+                        self.tree.set(item, 'child', '○')
+                    else:
+                        self.tree.set(item, 'child', '')
 
-    def show_sandbox_banner(self):
-        """Show a top banner indicating sandbox mode relaxed checks."""
-        try:
-            if hasattr(self, 'sandbox_banner') and self.sandbox_banner and self.sandbox_banner.winfo_exists():
-                return
-            self.sandbox_banner = ttk.Frame(self.root)
-            self.sandbox_banner.pack(fill=tk.X, before=self.root.winfo_children()[1])
-            label = ttk.Label(
-                self.sandbox_banner,
-                text="Sandbox detected: SOP checks are logged as warnings only.",
-                background="#fff4cc",
-                foreground="#7a5c00",
-                padding=8,
-                font=('Arial', 10, 'bold')
-            )
-            label.pack(fill=tk.X)
-            # Auto-hide after 10s
-            self.root.after(10000, self.hide_sandbox_banner)
-        except Exception:
-            pass
-
-    def hide_sandbox_banner(self):
-        try:
-            if hasattr(self, 'sandbox_banner') and self.sandbox_banner and self.sandbox_banner.winfo_exists():
-                self.sandbox_banner.destroy()
-        except Exception:
-            pass
     
     def get_parent_index(self):
         """Get the currently selected parent index."""
@@ -1740,10 +1915,9 @@ class CrosslistingGUI:
     def update_button_states(self):
         """Update button states based on current selections."""
         parent_index = self.get_parent_index()
-        child_index = self.get_child_index()
 
-        # Enable crosslist button if both parent and child are selected
-        if parent_index is not None and child_index is not None:
+        # Enable crosslist button if parent is selected and exactly one child is selected
+        if parent_index is not None and len(self.selected_children) == 1:
             self.crosslist_btn.config(state=tk.NORMAL)
         else:
             self.crosslist_btn.config(state=tk.DISABLED)
@@ -1819,26 +1993,29 @@ class CrosslistingGUI:
             # If the pre-check fails, proceed to validation to show errors later
             pass
 
-        # Validate the cross-listing using validation function; relax in sandbox mode
-        validation_errors = validate_cross_listing_candidates(self.config, parent_section, child_section)
-        sandbox_active = is_sandbox_course_name(parent_section.get('course_name', '')) or is_sandbox_course_name(child_section.get('course_name', ''))
+        # Validate the cross-listing using new validation function
+        errors, warnings = validate_cross_listing_candidates(self.config, parent_section, child_section)
 
-        if validation_errors and not sandbox_active:
-            # Enforce strict rule: parent unpublished and child published
-            message = "\n".join(validation_errors)
+        if errors:
+            # Show blocking errors
+            message = "\n".join(errors)
             if not message:
-                message = "Parent must be unpublished; Child must be published"
+                message = "Validation failed - please check course requirements"
             messagebox.showerror("Validation Failed", message)
             return
-        elif validation_errors and sandbox_active:
-            self.show_sandbox_banner()
 
-        # Show confirmation dialog only when valid
+        # Handle warnings with modal confirmation
+        if warnings:
+            warning_dialog = WarningConfirmDialog(self.root, warnings, parent_section, child_section)
+            if not warning_dialog.show():
+                return  # User cancelled after seeing warnings
+
+        # Show final confirmation dialog (warnings already handled)
         dialog = CrosslistingConfirmDialog(
             self.root,
             parent_section,
             child_section,
-            validation_errors,
+            [],  # No validation errors at this point (handled above)
             self.dry_run.get()
         )
 
@@ -2079,6 +2256,7 @@ class CrosslistingGUI:
         # Reset selections
         self.parent_var.set('')
         self.child_var.set('')
+        self.selected_children.clear()
         self.update_button_states()
 
     def apply_undo_ui_update(self, section_index: int):

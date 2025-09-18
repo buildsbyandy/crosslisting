@@ -402,15 +402,24 @@ def extract_course_number(course_code: str) -> str:
     return match.group(1) if match else course_code
 
 
-def is_sandbox_course_name(course_name: Optional[str]) -> bool:
-    """Detect sandbox courses by name.
+def get_course_prefix(course_code: str) -> str:
+    """Extract course prefix (letters before hyphen) for comparison.
 
-    A course is considered a sandbox if its name matches:
-    ^Sandbox Course \\d+ for [A-Za-z0-9._-]+
+    Examples:
+    - MATH-1405 -> MATH
+    - ENG-1301 -> ENG
+    - BIOL1405 -> BIOL (if no hyphen, extract letters before numbers)
     """
-    if not course_name:
-        return False
-    return re.match(r'^Sandbox Course \d+ for [A-Za-z0-9._-]+', str(course_name)) is not None
+    if not course_code:
+        return ""
+
+    # First try to find hyphen
+    if '-' in course_code:
+        return course_code.split('-')[0].strip().upper()
+
+    # If no hyphen, extract letters before numbers
+    match = re.match(r'^([A-Za-z]+)', course_code.strip())
+    return match.group(1).upper() if match else course_code.upper()
 
 
 def get_section(config: CanvasConfig, token_provider: TokenProvider, section_id: int, as_user_id: Optional[int] = None) -> Dict[str, Any]:
@@ -891,14 +900,19 @@ def get_course_sections(
         return []
 
 
-def validate_cross_listing_candidates(config: CanvasConfig, parent_section: Dict[str, Any], child_section: Dict[str, Any]) -> List[str]:
+def validate_cross_listing_candidates(config: CanvasConfig, parent_section: Dict[str, Any], child_section: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     """
     Validate if two sections can be cross-listed according to policy rules.
 
     Returns:
-        List of human-readable error messages (empty if valid)
+        Tuple of (errors, warnings) where:
+        - errors: List of blocking issues that prevent cross-listing
+        - warnings: List of issues that should show modal confirmation but allow proceeding
     """
     errors = []
+    warnings = []
+
+    # HARD ERRORS (blocking)
 
     # Check if sections are already cross-listed
     if parent_section.get('cross_listed'):
@@ -911,47 +925,54 @@ def validate_cross_listing_candidates(config: CanvasConfig, parent_section: Dict
     if parent_section['course_id'] == child_section['course_id']:
         errors.append("Cannot cross-list sections from the same course")
 
-    # Policy-based validation (SOP): enforce that parent is UNPUBLISHED (strict) and child is PUBLISHED
+    # Parent must be unpublished (blocking error)
     if config.require_parent_unpublished:
         if parent_section.get('published'):
             errors.append("Parent must be unpublished")
-    if config.forbid_parent_with_students:
-        if (parent_section.get('total_students', 0) > 0) and parent_section.get('published'):
-            errors.append("Parent is published and has student activity")
 
-    # Child must be published (strict)
+    # Child must be published (blocking error)
     if not child_section.get('published'):
         errors.append("Child course must be published")
 
-    # Course number matching
-    parent_number = extract_course_number(parent_section.get('course_code', ''))
-    child_number = extract_course_number(child_section.get('course_code', ''))
-    if parent_number and child_number and parent_number != child_number:
-        errors.append(f"Course numbers don't match: {parent_number} vs {child_number}")
-
-    # Same term required
+    # Same term required (blocking error)
     if config.enforce_same_term:
         parent_term = parent_section.get('enrollment_term_id')
         child_term = child_section.get('enrollment_term_id')
         if parent_term is not None and child_term is not None and parent_term != child_term:
             errors.append("Parent and child must be in the same enrollment term")
 
-    # Same subaccount check
-    if config.enforce_same_subaccount:
-        parent_subaccount = parent_section.get('subaccount_id')
-        child_subaccount = child_section.get('subaccount_id')
-        if parent_subaccount != child_subaccount:
-            errors.append(f"Subaccounts don't match: {parent_subaccount} vs {child_subaccount}")
+    # WARNINGS (modal confirmation)
 
-    # Teachers must match (only enforce when both sides have teacher lists)
+    # Parent cannot have students if published (warning)
+    if config.forbid_parent_with_students:
+        if (parent_section.get('total_students', 0) > 0) and parent_section.get('published'):
+            warnings.append("Parent is published and has student activity")
+
+    # Teachers must match (warning)
     parent_teachers = parent_section.get('teachers') or []
     child_teachers = child_section.get('teachers') or []
     parent_teacher_ids = {t.get('id') for t in parent_teachers if isinstance(t, dict) and t.get('id')}
     child_teacher_ids = {t.get('id') for t in child_teachers if isinstance(t, dict) and t.get('id')}
     if parent_teacher_ids and child_teacher_ids and parent_teacher_ids.isdisjoint(child_teacher_ids):
-        errors.append("Teachers must match between parent and child courses")
+        warnings.append("Teachers do not match between parent and child courses")
 
-    return errors
+    # Same subaccount check (warning)
+    if config.enforce_same_subaccount:
+        parent_subaccount = parent_section.get('subaccount_id')
+        child_subaccount = child_section.get('subaccount_id')
+        if parent_subaccount != child_subaccount:
+            warnings.append(f"Subaccounts don't match: {parent_subaccount} vs {child_subaccount}")
+
+    # Course name mismatch check (warning if different prefixes)
+    parent_code = parent_section.get('course_code', '')
+    child_code = child_section.get('course_code', '')
+    parent_prefix = get_course_prefix(parent_code)
+    child_prefix = get_course_prefix(child_code)
+
+    if parent_prefix and child_prefix and parent_prefix != child_prefix:
+        warnings.append(f"Course name mismatch: {parent_section.get('course_name', '')} vs {child_section.get('course_name', '')}")
+
+    return errors, warnings
 
 
 def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_id: Optional[int],
@@ -959,9 +980,7 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
                     result: str, dry_run: bool, message: str,
                     new_parent_course_title: Optional[str] = None,
                     child_section_ids: Optional[List[int]] = None,
-                    syllabus_updated: Optional[bool] = None,
-                    sandbox_mode: Optional[bool] = None,
-                    sop_warnings: Optional[List[str]] = None) -> None:
+                    syllabus_updated: Optional[bool] = None) -> None:
     """Log action to audit CSV."""
     audit_dir = Path('./logs')
     audit_dir.mkdir(exist_ok=True)
@@ -974,8 +993,7 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
         with open(audit_file, 'a', newline='', encoding='utf-8') as f:
             fieldnames = ['timestamp', 'actor_as_user_id', 'term_id', 'instructor_id', 'action',
                          'parent_course_id', 'child_section_id', 'result', 'dry_run', 'message',
-                         'new_parent_course_title', 'child_section_ids', 'syllabus_updated',
-                         'sandbox_mode', 'sop_warnings']
+                         'new_parent_course_title', 'child_section_ids', 'syllabus_updated']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 
             if not file_exists:
@@ -994,9 +1012,7 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
                 'message': message,
                 'new_parent_course_title': new_parent_course_title or '',
                 'child_section_ids': ",".join(str(i) for i in (child_section_ids or [])),
-                'syllabus_updated': '' if syllabus_updated is None else ('Yes' if syllabus_updated else 'No'),
-                'sandbox_mode': '' if sandbox_mode is None else ('Yes' if sandbox_mode else 'No'),
-                'sop_warnings': '\n'.join(sop_warnings) if sop_warnings else ''
+                'syllabus_updated': '' if syllabus_updated is None else ('Yes' if syllabus_updated else 'No')
             })
     except IOError as e:
         logger.warning(f"Failed to write audit log: {e}")
@@ -1027,9 +1043,7 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
         parent_term_id = parent_course.get('enrollment_term_id')
         child_term_id = child_course.get('enrollment_term_id')
 
-        # Sandbox auto-detection based on course names
-        sandbox_mode = bool(is_sandbox_course_name(parent_course.get('name')) or is_sandbox_course_name(child_course.get('name')))
-        sop_warnings: List[str] = []
+        # Removed sandbox mode logic - no longer needed
 
         # Helper to determine published state for SOP checks
         def _is_published(course: Dict[str, Any]) -> bool:
@@ -1039,42 +1053,20 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
         parent_has_students = (parent_course.get('total_students') or 0) > 0
         child_is_published = _is_published(child_course)
 
-        # Same term strict check unless in sandbox mode
+        # Same term strict check (blocking error)
         if config.enforce_same_term and parent_term_id is not None and child_term_id is not None and parent_term_id != child_term_id:
-            if sandbox_mode:
-                sop_warnings.append(f"Warning: Term mismatch (parent term {parent_term_id} vs child term {child_term_id})")
-            else:
-                message = (
-                    f"Term mismatch: parent course term {parent_term_id} vs child course term {child_term_id}. "
-                    f"Cross-listing blocked."
-                )
-                logger.error(message)
-                log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message,
-                                 sandbox_mode=False, sop_warnings=None)
-                return False
-
-        # Parent published with students -> warning in sandbox mode
-        if (config.require_parent_unpublished or config.forbid_parent_with_students) and parent_is_published and parent_has_students:
-            if sandbox_mode:
-                sop_warnings.append("Warning: Parent is published and has student activity (sandbox mode)")
-
-        # Child must be published -> warning in sandbox mode
-        if not child_is_published:
-            if sandbox_mode:
-                sop_warnings.append("Warning: Child course is not published (sandbox mode)")
-
-        # Teachers must match -> warning in sandbox mode
-        parent_teacher_ids = {t.get('id') for t in (parent_course.get('teachers') or []) if isinstance(t, dict) and t.get('id')}
-        child_teacher_ids = {t.get('id') for t in (child_course.get('teachers') or []) if isinstance(t, dict) and t.get('id')}
-        if parent_teacher_ids and child_teacher_ids and parent_teacher_ids.isdisjoint(child_teacher_ids):
-            if sandbox_mode:
-                sop_warnings.append("Warning: Teachers do not match between parent and child (sandbox mode)")
+            message = (
+                f"Term mismatch: parent course term {parent_term_id} vs child course term {child_term_id}. "
+                f"Cross-listing blocked."
+            )
+            logger.error(message)
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message)
+            return False
 
     except CanvasAPIError as e:
         message = f"Failed to fetch course details for term check: {e.message}"
         logger.error(message)
-        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message,
-                         sandbox_mode=None, sop_warnings=None)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message)
         return False
 
     # No-op if already in the target parent course
@@ -1096,11 +1088,7 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
     if dry_run:
         message = f"DRY RUN: Would cross-list section {child_section_id} into course {parent_course_id}"
         print(f"🔄 {message}")
-        try:
-            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", True, message,
-                             sandbox_mode=sandbox_mode, sop_warnings=sop_warnings)
-        except NameError:
-            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", True, message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", True, message)
         return True
 
     client = CanvasAPIClient(token_provider, config, as_user_id)
@@ -1126,45 +1114,26 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
             if updates.get('new_course_name'):
                 message += f"; new course name: {updates['new_course_name']}"
             print(f"✅ {message}")
-            try:
-                log_audit_action(
-                    as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id,
-                    "success", False, message,
-                    new_parent_course_title=updates.get('new_course_name'),
-                    child_section_ids=updates.get('child_section_ids') or [],
-                    syllabus_updated=updates.get('syllabus_updated'),
-                    sandbox_mode=sandbox_mode,
-                    sop_warnings=sop_warnings
-                )
-            except NameError:
-                log_audit_action(
-                    as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id,
-                    "success", False, message,
-                    new_parent_course_title=updates.get('new_course_name'),
-                    child_section_ids=updates.get('child_section_ids') or [],
-                    syllabus_updated=updates.get('syllabus_updated')
-                )
+            log_audit_action(
+                as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id,
+                "success", False, message,
+                new_parent_course_title=updates.get('new_course_name'),
+                child_section_ids=updates.get('child_section_ids') or [],
+                syllabus_updated=updates.get('syllabus_updated')
+            )
             return True
         else:
             message = (
                 f"Post-verification failed: section {child_section_id} course_id is {post_section.get('course_id')} not {parent_course_id}"
             )
             logger.error(message)
-            try:
-                log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message,
-                                 sandbox_mode=sandbox_mode, sop_warnings=sop_warnings)
-            except NameError:
-                log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message)
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message)
             return False
 
     except CanvasAPIError as e:
         message = f"Failed to cross-list section: {e.message}"
         logger.error(message)
-        try:
-            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message,
-                             sandbox_mode=sandbox_mode, sop_warnings=sop_warnings)
-        except NameError:
-            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message)
         return False
 
 
@@ -1816,18 +1785,19 @@ def main():
             if not child_section:
                 continue
 
-            # Validate cross-listing; allow in sandbox mode with warnings
-            errors = validate_cross_listing_candidates(config, parent_section, child_section)
-            parent_is_sandbox = is_sandbox_course_name(parent_section.get('course_name', ''))
-            child_is_sandbox = is_sandbox_course_name(child_section.get('course_name', ''))
-            sandbox_active = parent_is_sandbox or child_is_sandbox
-            if errors and not sandbox_active:
+            # Validate cross-listing
+            errors, warnings = validate_cross_listing_candidates(config, parent_section, child_section)
+            if errors:
                 print(f"❌ Validation failed:")
                 for error in errors:
                     print(f"  • {error}")
                 continue
-            elif errors and sandbox_active:
-                print("⚠️  Sandbox detected: SOP checks relaxed. Warnings logged, not enforced.")
+
+            if warnings:
+                print("⚠️  Warnings detected:")
+                for warning in warnings:
+                    print(f"  • {warning}")
+                print("\nPlease review these warnings carefully before proceeding.")
 
             # Confirm cross-listing
             print(f"\nPlease confirm the cross-listing:")
