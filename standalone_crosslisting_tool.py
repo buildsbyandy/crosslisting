@@ -130,8 +130,8 @@ class CanvasAPIClient:
     
     def _rate_limit(self):
         """Implement basic rate limiting between requests."""
-        # Simple delay between requests - removed shared state for thread safety
-        time.sleep(0.1)  # 100ms delay instead of 1 second
+        # Simple delay between requests - thread-safe
+        time.sleep(0.2)  # 200ms delay to be more conservative with API
     
     def _make_request(self, method: str, path: str, params: Optional[Dict] = None,
                      data: Optional[Dict] = None) -> Dict[str, Any]:
@@ -625,13 +625,18 @@ def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider:
         "enrollment_term_id": term_id,
         "per_page": config.per_page
     }
-    enrollments = client.get_paginated_data(enroll_path, enroll_params)
+    logger.info(f"Fetching enrollments for user {user_id} in term {term_id}")
+    enrollments = client.get_paginated_data(enroll_path, enroll_params, max_pages=5)  # Limit pages to prevent infinite loops
+    logger.info(f"Found {len(enrollments)} enrollments")
     course_ids = sorted({e.get("course_id") for e in enrollments if e.get("course_id")})
+    logger.info(f"Extracted {len(course_ids)} unique course IDs: {course_ids}")
 
     # 2) Hydrate courses in parallel with ThreadPoolExecutor
     def fetch_course(course_id: int) -> Optional[dict]:
         try:
-            return client._make_request(
+            # Create a separate client for each thread to avoid shared state issues
+            thread_client = CanvasAPIClient(token_provider, config)
+            return thread_client._make_request(
                 "GET",
                 f"/api/v1/courses/{course_id}",
                 params={"include[]": ["term", "teachers", "sections", "total_students"]}
@@ -641,12 +646,17 @@ def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider:
             return None
 
     courses: list[dict] = []
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        course_futures = {executor.submit(fetch_course, cid): cid for cid in course_ids}
-        for future in course_futures:
-            course = future.result()
-            if course:
-                courses.append(course)
+    if course_ids:
+        # Limit parallel requests to avoid overwhelming the API
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            course_futures = {executor.submit(fetch_course, cid): cid for cid in course_ids}
+            for future in course_futures:
+                try:
+                    course = future.result(timeout=30)  # Add timeout
+                    if course:
+                        courses.append(course)
+                except Exception as e:
+                    logger.warning(f"Failed to get course result: {e}")
 
     return courses
 
@@ -713,12 +723,13 @@ def list_sections_for_courses(config: CanvasConfig, token_provider: TokenProvide
 
 def check_course_permissions(config: CanvasConfig, token_provider: TokenProvider, course_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     """Check permissions for potential parent courses."""
-    client = CanvasAPIClient(token_provider, config)
     permissions_map = {}
 
     def check_single_course(course_id: int) -> Tuple[int, Dict[str, Any]]:
         try:
-            resp = client._make_request(
+            # Create a separate client for each thread to avoid shared state issues
+            thread_client = CanvasAPIClient(token_provider, config)
+            resp = thread_client._make_request(
                 'GET',
                 f'/api/v1/courses/{course_id}',
                 params={'include[]': ['permissions']}
@@ -735,12 +746,23 @@ def check_course_permissions(config: CanvasConfig, token_provider: TokenProvider
                 'reason': f'Permission check failed: {e.message}'
             }
 
-    # Check permissions in parallel
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        future_to_course = {executor.submit(check_single_course, cid): cid for cid in course_ids}
-        for future in future_to_course:
-            course_id, permission_info = future.result()
-            permissions_map[course_id] = permission_info
+    # Check permissions in parallel with reduced worker count and timeout
+    if course_ids:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_course = {executor.submit(check_single_course, cid): cid for cid in course_ids}
+            for future in future_to_course:
+                try:
+                    course_id, permission_info = future.result(timeout=15)
+                    permissions_map[course_id] = permission_info
+                except Exception as e:
+                    logger.warning(f"Failed to check permissions: {e}")
+                    # Add default deny permissions for failed checks
+                    cid = future_to_course.get(future)
+                    if cid:
+                        permissions_map[cid] = {
+                            'can_crosslist': False,
+                            'reason': 'Permission check timed out'
+                        }
 
     return permissions_map
 
