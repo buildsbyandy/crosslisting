@@ -6,6 +6,7 @@ Desktop GUI wrapper for the Canvas crosslisting tool with staff capabilities.
 
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
+import shutil
 import threading
 import json
 import sys
@@ -22,9 +23,10 @@ from standalone_crosslisting_tool import (
     CanvasAPIError, resolve_instructor, list_user_term_courses_via_enrollments,
     list_account_courses_filtered, list_sections_for_courses,
     format_sections_for_ui, cross_list_section, un_cross_list_section,
-    check_course_permissions, EnvTokenProvider, extract_course_number,
+        check_course_permissions, EnvTokenProvider, extract_course_number,
     export_sections_to_csv, get_section, summarize_crosslist_changes
 )
+from standalone_crosslisting_tool import is_sandbox_course_name
 
 
 class AboutCrosslistingWindow:
@@ -387,7 +389,12 @@ def get_friendly_error_message(error_code: int, message: str) -> str:
 
 def create_tooltip(widget, text):
     """Create a tooltip for a widget."""
+    tooltip = None
+    
     def show_tooltip(event):
+        nonlocal tooltip
+        if tooltip is not None:
+            return
         tooltip = tk.Toplevel()
         tooltip.wm_overrideredirect(True)
         tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
@@ -395,12 +402,14 @@ def create_tooltip(widget, text):
         label = ttk.Label(tooltip, text=text, background="yellow", font=('Arial', 9))
         label.pack()
 
-        def hide_tooltip():
+    def hide_tooltip(event):
+        nonlocal tooltip
+        if tooltip is not None:
             tooltip.destroy()
-
-        tooltip.after(3000, hide_tooltip)  # Hide after 3 seconds
+            tooltip = None
 
     widget.bind('<Enter>', show_tooltip)
+    widget.bind('<Leave>', hide_tooltip)
 
 
 class CrosslistingGUI:
@@ -409,8 +418,22 @@ class CrosslistingGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Canvas Cross-Listing Tool (Staff)")
-        self.root.geometry("800x600")
-        self.root.minsize(800, 600)
+        
+        # Set window size and center it on screen
+        window_width = 1000
+        window_height = 700
+        
+        # Get screen dimensions
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        # Calculate position to center the window horizontally, but place it higher than center vertically
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2 - 50  # 50px higher than center
+        
+        # Set geometry with centered position
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        self.root.minsize(900, 700)
         
         # Application state
         self._is_closing = False
@@ -427,6 +450,11 @@ class CrosslistingGUI:
         self.selected_term_id = None
         self.current_instructor = None  # Selected instructor info
         self.cached_sections = {}  # Cache sections by term_id
+        self.instructor_dropdown = None
+        self.instructor_candidates = []
+        self._last_parent_index = None
+        self._last_child_index = None
+        self._last_undo_index = None
 
         # GUI variables
         self.selected_term = tk.StringVar()
@@ -449,6 +477,9 @@ class CrosslistingGUI:
         # Initialize GUI
         self.create_gui()
         self.load_configuration()
+        
+        # Initially disable all form elements until term is selected
+        self.set_form_state(False)
         
         # Load terms on startup
         self.load_terms()
@@ -583,7 +614,7 @@ class CrosslistingGUI:
         self.term_combo.bind('<<ComboboxSelected>>', self.on_term_selected)
         
         # Filters frame
-        filters_frame = ttk.LabelFrame(main_frame, text="Filters")
+        filters_frame = ttk.LabelFrame(main_frame, text="Course Selection Filters")
         filters_frame.pack(fill=tk.X, pady=(0, 10))
         
         # Filter controls
@@ -599,6 +630,8 @@ class CrosslistingGUI:
             width=40
         )
         self.instructor_entry.grid(row=0, column=1, columnspan=2, sticky=tk.EW, padx=(0, 10))
+        # Pressing Enter resolves the instructor
+        self.instructor_entry.bind('<Return>', lambda e: self.resolve_instructor_input())
 
         # Add placeholder text for Instructor
         self.add_placeholder(self.instructor_entry, "Canvas ID, @collin.edu email, SIS ID, or name. Leave blank only if you intend staff mode.")
@@ -611,76 +644,148 @@ class CrosslistingGUI:
         )
         self.resolve_btn.grid(row=0, column=3, padx=(5, 0))
 
+        # Green check indicator for instructor selection
+        self.instructor_status = ttk.Label(filter_grid, text="", foreground="green")
+        self.instructor_status.grid(row=0, column=4, padx=(5, 0), sticky=tk.W)
+        
+        # Instructor info display will be moved to above the table
+
+        # Remove typeahead per UX: rely on explicit Resolve -> modal selection
+
+        # Visual separator
+        separator = ttk.Separator(filter_grid, orient='horizontal')
+        separator.grid(row=1, column=0, columnspan=4, sticky=tk.EW, pady=(10, 5))
+
         # Row 2: Staff mode toggle and search
         self.staff_toggle = ttk.Checkbutton(
             filter_grid,
-            text="Browse whole term (staff)",
+            text="Browse all courses in term (staff mode)",
             variable=self.staff_mode,
             command=self.on_staff_mode_toggle
         )
-        self.staff_toggle.grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
+        self.staff_toggle.grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
 
-        self.search_label = ttk.Label(filter_grid, text="Search:")
-        self.search_label.grid(row=1, column=1, sticky=tk.W, padx=(20, 5), pady=(10, 0))
+        # Search section with better labeling
+        search_frame = ttk.Frame(filter_grid)
+        search_frame.grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=(20, 10), pady=(5, 0))
+        
+        self.search_label = ttk.Label(search_frame, text="Search for courses:", font=('Arial', 9, 'bold'))
+        self.search_label.pack(anchor=tk.W)
 
         self.course_entry = ttk.Entry(
-            filter_grid,
+            search_frame,
             textvariable=self.course_search,
-            width=20,
+            width=25,
             state=tk.DISABLED
         )
-        self.course_entry.grid(row=1, column=2, sticky=tk.W, padx=(0, 10), pady=(10, 0))
+        self.course_entry.pack(fill=tk.X, pady=(2, 0))
 
-        # Add placeholder text for Course ID
-        self.add_placeholder(self.course_entry, "e.g. MATH, 1405, BIO")
+        # Add placeholder text for Course ID - use the same approach as instructor field
+        self.add_placeholder(self.course_entry, "Canvas ID, course code, or subject (e.g. MATH, 1405, BIO)")
+        
+        # Help text for search
+        self.search_help = ttk.Label(
+            search_frame, 
+            text="Ex: 'MATH' finds all Math courses, '1405' finds courses with 1405, 'BIO' finds Biology courses",
+            font=('Arial', 8),
+            foreground='gray'
+        )
+        self.search_help.pack(anchor=tk.W, pady=(2, 0))
 
-        # Row 3: Options and Load button
-        options_frame = ttk.Frame(filter_grid)
-        options_frame.grid(row=2, column=0, columnspan=4, sticky=tk.EW, pady=(10, 0))
+        # Row 3: Load button with better context
+        load_frame = ttk.Frame(filter_grid)
+        load_frame.grid(row=3, column=0, columnspan=4, sticky=tk.EW, pady=(15, 0))
 
-        ttk.Checkbutton(
-            options_frame,
-            text="Dry run",
-            variable=self.dry_run
-        ).pack(side=tk.LEFT, padx=(0, 10))
+        # Mode indicator
+        self.mode_indicator = ttk.Label(
+            load_frame, 
+            text="Instructor Mode: Loading courses for selected instructor", 
+            foreground="blue", 
+            font=('Arial', 9, 'italic')
+        )
+        self.mode_indicator.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Checkbutton(
-            options_frame,
-            text="Bypass cache",
-            variable=self.bypass_cache
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        ttk.Checkbutton(
-            options_frame,
-            text="Override SIS stickiness (staff/admin)",
-            variable=self.override_sis_stickiness
-        ).pack(side=tk.LEFT, padx=(0, 10))
-
-        self.staff_info_label = ttk.Label(options_frame, text="", foreground="blue", font=('Arial', 9))
-        self.staff_info_label.pack(side=tk.LEFT, padx=(10, 0))
+        self.staff_info_label = ttk.Label(load_frame, text="", foreground="blue", font=('Arial', 9))
+        self.staff_info_label.pack(side=tk.LEFT, padx=(0, 10))
 
         self.load_btn = ttk.Button(
-            options_frame,
-            text="Load",
+            load_frame,
+            text="Load Course Sections",
             command=self.load_sections,
             state=tk.DISABLED
         )
         self.load_btn.pack(side=tk.RIGHT)
 
-        # Configure grid weights
-        filter_grid.columnconfigure(1, weight=1)
+        # Configure grid weights to give more space to search area
+        filter_grid.columnconfigure(1, weight=2)
         filter_grid.columnconfigure(2, weight=1)
         
+        # Developer Tools section (collapsible)
+        self.dev_tools_frame = ttk.LabelFrame(main_frame, text="Developer Tools (Advanced)")
+        self.dev_tools_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Initially hide dev tools
+        self.dev_tools_visible = False
+        self.dev_tools_frame.pack_forget()
+        
+        # Dev tools content
+        dev_content_frame = ttk.Frame(self.dev_tools_frame)
+        dev_content_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        dry_run_cb = ttk.Checkbutton(
+            dev_content_frame,
+            text="Test Run",
+            variable=self.dry_run
+        )
+        dry_run_cb.pack(side=tk.LEFT, padx=(0, 15))
+        create_tooltip(dry_run_cb, "Preview changes without actually modifying Canvas")
+
+        bypass_cache_cb = ttk.Checkbutton(
+            dev_content_frame,
+            text="Bypass cache",
+            variable=self.bypass_cache
+        )
+        bypass_cache_cb.pack(side=tk.LEFT, padx=(0, 15))
+        create_tooltip(bypass_cache_cb, "Skip cached data and fetch fresh information from Canvas")
+
+        override_sis_cb = ttk.Checkbutton(
+            dev_content_frame,
+            text="Override SIS stickiness (staff/admin)",
+            variable=self.override_sis_stickiness
+        )
+        override_sis_cb.pack(side=tk.LEFT, padx=(0, 15))
+        create_tooltip(override_sis_cb, "Allow cross-listing even when SIS data would normally prevent it (staff/admin only)")
+        
         # About cross-listing link
-        about_frame = ttk.Frame(main_frame)
-        about_frame.pack(fill=tk.X, pady=(0, 10))
+        self.about_frame = ttk.Frame(main_frame)
+        self.about_frame.pack(fill=tk.X, pady=(0, 10))
         
         about_link = ttk.Button(
-            about_frame,
+            self.about_frame,
             text="About Cross-listing",
             command=self.show_about_dialog
         )
         about_link.pack(side=tk.LEFT)
+        
+        # Toggle dev tools button
+        self.toggle_dev_btn = ttk.Button(
+            self.about_frame,
+            text="Show Developer Tools",
+            command=self.toggle_dev_tools
+        )
+        self.toggle_dev_btn.pack(side=tk.RIGHT)
+        
+        # Instructor info display above the table
+        self.instructor_info_frame = ttk.Frame(main_frame)
+        self.instructor_info_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.instructor_info_label = ttk.Label(
+            self.instructor_info_frame, 
+            text="", 
+            foreground="darkblue", 
+            font=('Arial', 10, 'bold')
+        )
+        self.instructor_info_label.pack()
         
         # Sections table frame
         table_frame = ttk.LabelFrame(main_frame, text="Course Sections")
@@ -693,6 +798,7 @@ class CrosslistingGUI:
         action_frame = ttk.Frame(table_frame)
         action_frame.pack(fill=tk.X, padx=10, pady=10)
 
+        # Left side - main action button
         self.crosslist_btn = ttk.Button(
             action_frame,
             text="Confirm Cross-listing",
@@ -701,13 +807,25 @@ class CrosslistingGUI:
         )
         self.crosslist_btn.pack(side=tk.LEFT, padx=(0, 10))
 
+        # Right side - export buttons
+        export_frame = ttk.Frame(action_frame)
+        export_frame.pack(side=tk.RIGHT)
+
         self.export_btn = ttk.Button(
-            action_frame,
+            export_frame,
             text="Export CSV",
             command=self.export_csv,
             state=tk.DISABLED
         )
         self.export_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.export_audit_btn = ttk.Button(
+            export_frame,
+            text="Export Audit Log (CSV)",
+            command=self.export_audit_log,
+            state=tk.NORMAL
+        )
+        self.export_audit_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         # Load more button for staff mode (initially hidden)
         self.load_more_btn = ttk.Button(
@@ -745,15 +863,15 @@ class CrosslistingGUI:
         # Define columns
         columns = ('parent', 'child', 'course_title', 'published', 'cross_listed', 'undo')
         
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=15)
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=8)
         
         # Define headings
-        self.tree.heading('parent', text='Parent')
-        self.tree.heading('child', text='Child')  
-        self.tree.heading('course_title', text='Course Title')
-        self.tree.heading('published', text='Published')
-        self.tree.heading('cross_listed', text='Cross-listed')
-        self.tree.heading('undo', text='Undo')
+        self.tree.heading('parent', text='Parent', command=lambda: self.sort_by_column('parent', False))
+        self.tree.heading('child', text='Child', command=lambda: self.sort_by_column('child', False))  
+        self.tree.heading('course_title', text='Course Title', command=lambda: self.sort_by_column('course_title', False))
+        self.tree.heading('published', text='Published', command=lambda: self.sort_by_column('published', False))
+        self.tree.heading('cross_listed', text='Cross-listed', command=lambda: self.sort_by_column('cross_listed', False))
+        self.tree.heading('undo', text='Undo', command=lambda: self.sort_by_column('undo', False))
         
         # Configure column widths
         self.tree.column('parent', width=60, anchor=tk.CENTER)
@@ -777,6 +895,9 @@ class CrosslistingGUI:
         # Bind selection events
         self.tree.bind('<ButtonRelease-1>', self.on_tree_click)
         self.tree.bind('<Double-1>', self.on_tree_double_click)
+
+        # Highlight cross-listed rows
+        self.tree.tag_configure('xlisted', background='#fff4e5')
     
     def load_configuration(self):
         """Load Canvas API configuration."""
@@ -817,6 +938,25 @@ class CrosslistingGUI:
                     self.root.after(0, self.hide_progress)
 
         self.start_thread(load_terms_thread, "LoadTerms")
+
+    def show_error_toast(self, message: str):
+        """Display a temporary red toast popup with the given message."""
+        try:
+            toast = tk.Toplevel(self.root)
+            toast.overrideredirect(True)
+            toast.attributes('-topmost', True)
+            frame = ttk.Frame(toast)
+            frame.pack(fill=tk.BOTH, expand=True)
+            label = ttk.Label(frame, text=message, background='#ffdddd', foreground='red', padding=10)
+            label.pack(fill=tk.BOTH, expand=True)
+            # Position top-right of main window
+            self.root.update_idletasks()
+            x = self.root.winfo_rootx() + self.root.winfo_width() - 350
+            y = self.root.winfo_rooty() + 50
+            toast.geometry(f"300x80+{x}+{y}")
+            self.root.after(4000, toast.destroy)
+        except Exception:
+            pass
     
     def add_placeholder(self, entry_widget, placeholder_text):
         """Add placeholder text to an Entry widget."""
@@ -830,9 +970,27 @@ class CrosslistingGUI:
                 entry_widget.config(foreground=original_fg)
         
         def on_focus_out(event):
-            if not entry_widget.get():
+            if not entry_widget.get().strip():
                 entry_widget.insert(0, placeholder_text)
                 entry_widget.config(foreground=placeholder_fg)
+        
+        def on_key_press(event):
+            # If placeholder is showing and user starts typing, clear it
+            if entry_widget.get() == placeholder_text and entry_widget.cget('foreground') == placeholder_fg:
+                entry_widget.delete(0, tk.END)
+                entry_widget.config(foreground=original_fg)
+        
+        def on_key_release(event):
+            # Check if field becomes empty while typing
+            if not entry_widget.get().strip() and entry_widget.cget('foreground') == original_fg:
+                entry_widget.insert(0, placeholder_text)
+                entry_widget.config(foreground=placeholder_fg)
+        
+        def on_click(event):
+            # If placeholder is showing and user clicks anywhere in the field, clear it
+            if entry_widget.get() == placeholder_text and entry_widget.cget('foreground') == placeholder_fg:
+                entry_widget.delete(0, tk.END)
+                entry_widget.config(foreground=original_fg)
         
         # Set initial placeholder
         entry_widget.insert(0, placeholder_text)
@@ -841,6 +999,9 @@ class CrosslistingGUI:
         # Bind events
         entry_widget.bind('<FocusIn>', on_focus_in)
         entry_widget.bind('<FocusOut>', on_focus_out)
+        entry_widget.bind('<KeyPress>', on_key_press)
+        entry_widget.bind('<KeyRelease>', on_key_release)
+        entry_widget.bind('<Button-1>', on_click)
         
         # Store placeholder info for later retrieval
         entry_widget._placeholder_text = placeholder_text
@@ -895,30 +1056,50 @@ class CrosslistingGUI:
         # Ignore placeholder text
         if selection >= 0 and selected_text != "Select term...":
             self.selected_term_id = self.terms[selection]['id']
-            self.resolve_btn.config(state=tk.NORMAL)
             self.status_var.set(f"Term selected: {self.terms[selection]['name']}")
+            
+            # Enable form elements
+            self.set_form_state(True)
 
             # Clear previous sections and instructor
             self.clear_sections_table()
             self.current_instructor = None
+            self.instructor_info_label.config(text="")
             self.update_load_button_state()
         else:
             # No valid term selected
             self.selected_term_id = None
-            self.resolve_btn.config(state=tk.DISABLED)
-            self.load_btn.config(state=tk.DISABLED)
+            self.set_form_state(False)
             self.clear_sections_table()
 
     def on_staff_mode_toggle(self):
         """Handle staff mode toggle."""
         if self.staff_mode.get():
-            # Enable staff mode
-            self.course_entry.config(state=tk.NORMAL)
-            self.staff_info_label.config(text="Page limit: 5")
+            # Enable staff mode - clear instructor info since we're browsing all courses
+            self.current_instructor = None
+            self.instructor_info_label.config(text="")
+            self.instructor_status.config(text="")
+            
+            if self.selected_term_id:  # Only enable if term is selected
+                self.course_entry.config(state=tk.NORMAL)
+                # Ensure placeholder is properly set when field becomes enabled
+                if not self.get_entry_value(self.course_entry):
+                    self.course_entry.delete(0, tk.END)
+                    self.course_entry.insert(0, "Canvas ID, course code, or subject (e.g. MATH, 1405, BIO)")
+                    self.course_entry.config(foreground='grey')
+            self.mode_indicator.config(
+                text="Staff Mode: Searching all courses in term", 
+                foreground="green"
+            )
+            self.staff_info_label.config(text="Page limit: 5 (use 'Load More' for additional pages)")
             self.load_more_btn.pack(side=tk.RIGHT, padx=(10, 0))
         else:
             # Disable staff mode
             self.course_entry.config(state=tk.DISABLED)
+            self.mode_indicator.config(
+                text="Instructor Mode: Loading courses for selected instructor", 
+                foreground="blue"
+            )
             self.staff_info_label.config(text="")
             self.load_more_btn.pack_forget()
 
@@ -987,18 +1168,64 @@ class CrosslistingGUI:
 
         self.start_thread(resolve_thread, "ResolveInstructor")
 
+    # Typeahead removed
+
+    # Dropdown-based typeahead removed
+
+    # hide_instructor_dropdown removed (no-op)
+
+    # on_dropdown_select removed (no-op)
+
+    def set_current_instructor(self, instructor):
+        self.current_instructor = instructor
+        name = instructor.get('name', '')
+        email = instructor.get('email', '')
+        canvas_id = instructor.get('id', '')
+        login_id = instructor.get('login_id', '')
+        
+        self.instructor_status.config(text="✔")
+        self.status_var.set(f"Instructor selected: {name} ({email})")
+        
+        # Display detailed instructor information
+        info_text = f"Current Instructor: {name}"
+        if login_id:
+            info_text += f" | Login: {login_id}"
+        if canvas_id:
+            info_text += f" | Canvas ID: {canvas_id}"
+        if email:
+            info_text += f" | Email: {email}"
+        
+        self.instructor_info_label.config(text=info_text)
+        
+        # Reflect selection in entry
+        try:
+            self.instructor_entry.delete(0, tk.END)
+            self.instructor_entry.insert(0, name or str(canvas_id))
+        except Exception:
+            pass
+        self.update_load_button_state()
+
     def handle_instructor_resolution(self, resolution):
         """Handle instructor resolution result."""
         candidates = resolution.get('candidates', [])
+        raw_matches = resolution.get('raw_matches', None)
 
-        if not candidates:
-            messagebox.showinfo("No Match", "No active teacher matches in this term.")
+        if raw_matches == 0:
+            # No user matched at all
+            messagebox.showerror("No Match", "No instructor found with that ID/email/name.")
+            self.status_var.set("No instructor found with that ID/email/name.")
+            self.current_instructor = None
+        elif not candidates and (raw_matches is None or raw_matches > 0):
+            # Found user(s) but none with active enrollments in term
+            messagebox.showerror("No Active Courses", "Instructor found, but no active courses in this term.")
+            self.status_var.set("Instructor found, but no active courses in this term.")
             self.current_instructor = None
         elif len(candidates) == 1:
             self.current_instructor = candidates[0]
-            instructor_name = self.current_instructor['name']
-            instructor_email = self.current_instructor['email']
-            self.status_var.set(f"Instructor resolved: {instructor_name} ({instructor_email})")
+            self.set_current_instructor(self.current_instructor)
+            # Auto-load sections after successful resolution
+            self.update_load_button_state()
+            self.load_sections()
         else:
             # Multiple candidates - show selection dialog
             dialog = InstructorSelectionDialog(self.root, candidates)
@@ -1006,11 +1233,13 @@ class CrosslistingGUI:
 
             if selected:
                 self.current_instructor = selected
-                instructor_name = self.current_instructor['name']
-                instructor_email = self.current_instructor['email']
-                self.status_var.set(f"Instructor selected: {instructor_name} ({instructor_email})")
+                self.set_current_instructor(self.current_instructor)
+                # Auto-load after selection
+                self.update_load_button_state()
+                self.load_sections()
             else:
                 self.current_instructor = None
+                self.instructor_info_label.config(text="")
                 self.status_var.set("Instructor selection cancelled")
 
         self.update_load_button_state()
@@ -1019,6 +1248,9 @@ class CrosslistingGUI:
         """Load sections based on current mode (instructor or staff)."""
         if not self.selected_term_id:
             return
+
+        # Disable load during fetch
+        self.load_btn.config(state=tk.DISABLED)
 
         def load_sections_thread():
             try:
@@ -1071,6 +1303,7 @@ class CrosslistingGUI:
             finally:
                 if not self._is_closing:
                     self.root.after(0, self.hide_progress)
+                    self.root.after(0, self.update_load_button_state)
 
         self.start_thread(load_sections_thread, "LoadSections")
 
@@ -1207,6 +1440,9 @@ class CrosslistingGUI:
         self.clear_sections_table()
 
         if not self.sections:
+            # Show placeholder row
+            placeholder = "No courses found for this instructor in the selected term."
+            self.tree.insert('', 'end', values=('', '', placeholder, '', '', ''))
             self.status_var.set("No sections found")
             return
 
@@ -1227,6 +1463,11 @@ class CrosslistingGUI:
             can_be_child = ui_row.get('child_candidate', False)
             permission_block = ui_row.get('permission_block')
 
+            # Sandbox dry-run bypass: allow parent even if Canvas denied permissions
+            is_sandbox = is_sandbox_course_name(section.get('course_name', ''))
+            if is_sandbox and self.dry_run.get() and permission_block:
+                permission_block = None  # Clear permission block for sandbox in dry run mode
+
             # Create parent radio (disabled if permission blocked)
             parent_radio = '○' if can_be_parent and not permission_block else ''
             if permission_block:
@@ -1241,6 +1482,10 @@ class CrosslistingGUI:
                 ui_row.get('cross_listed', 'No'),
                 'Undo' if ui_row.get('undo_allowed', False) else ''
             ))
+
+            # Tag cross-listed rows for highlight
+            if section.get('cross_listed'):
+                self.tree.item(item_id, tags=('xlisted',))
 
             # Add visual indicators
             if section.get('published'):
@@ -1293,6 +1538,11 @@ class CrosslistingGUI:
             ui_row = self.ui_rows[section_index] if section_index < len(self.ui_rows) else {}
             permission_block = ui_row.get('permission_block')
 
+            # Sandbox dry-run bypass: allow parent even if Canvas denied permissions
+            is_sandbox = is_sandbox_course_name(section.get('course_name', ''))
+            if is_sandbox and self.dry_run.get() and permission_block:
+                permission_block = None  # Clear permission block for sandbox in dry run mode
+
             if permission_block:
                 messagebox.showwarning("Permission Denied", permission_block)
                 return
@@ -1327,6 +1577,11 @@ class CrosslistingGUI:
                 ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
                 permission_block = ui_row.get('permission_block')
 
+                # Sandbox dry-run bypass: allow parent even if Canvas denied permissions
+                is_sandbox = is_sandbox_course_name(self.sections[i].get('course_name', ''))
+                if is_sandbox and self.dry_run.get() and permission_block:
+                    permission_block = None  # Clear permission block for sandbox in dry run mode
+
                 if permission_block:
                     self.tree.set(item, 'parent', '🚫')
                 elif ui_row.get('parent_candidate', False):
@@ -1351,16 +1606,28 @@ class CrosslistingGUI:
         parent_section = self.sections[parent_index]
         child_section = self.sections[section_index]
 
+        # Sandbox detection: relax course number mismatch constraint but warn
+        parent_is_sandbox = is_sandbox_course_name(parent_section.get('course_name', ''))
+        child_is_sandbox = is_sandbox_course_name(child_section.get('course_name', ''))
+        sandbox_active = parent_is_sandbox or child_is_sandbox
+
         # Validate course match using course number grouping
         parent_course_num = extract_course_number(parent_section.get('course_code', ''))
         child_course_num = extract_course_number(child_section.get('course_code', ''))
 
+        # Show sandbox banner if applicable
+        if sandbox_active:
+            self.show_sandbox_banner()
+
         if parent_course_num != child_course_num:
-            messagebox.showwarning(
-                "Course Number Mismatch",
-                f"Course numbers must match:\nParent: {parent_course_num}\nChild: {child_course_num}"
-            )
-            return
+            if sandbox_active:
+                self.show_sandbox_banner()
+            else:
+                messagebox.showwarning(
+                    "Course Number Mismatch",
+                    f"Course numbers must match:\nParent: {parent_course_num}\nChild: {child_course_num}"
+                )
+                return
 
         # Clear all child selections
         for i, item in enumerate(self.tree.get_children()):
@@ -1386,7 +1653,11 @@ class CrosslistingGUI:
 
         if parent_index is not None:
             parent_section = self.sections[parent_index]
+            parent_is_sandbox = is_sandbox_course_name(parent_section.get('course_name', ''))
             parent_course_num = extract_course_number(parent_section.get('course_code', ''))
+
+            if parent_is_sandbox:
+                self.show_sandbox_banner()
 
             for i, item in enumerate(self.tree.get_children()):
                 if i == parent_index:
@@ -1396,9 +1667,13 @@ class CrosslistingGUI:
                     ui_row = self.ui_rows[i] if i < len(self.ui_rows) else {}
                     section_course_num = extract_course_number(self.sections[i].get('course_code', ''))
 
-                    # Can be child if: child candidate and course numbers match
-                    if (ui_row.get('child_candidate', False) and
-                        section_course_num == parent_course_num):
+                    # Sandbox dry-run bypass: allow children pairing if parent is sandbox AND dry run is true
+                    can_be_child = ui_row.get('child_candidate', False)
+                    course_numbers_match = section_course_num == parent_course_num
+                    sandbox_dryrun_bypass = parent_is_sandbox and self.dry_run.get()
+
+                    # Can be child if: child candidate and (course numbers match OR sandbox+dry_run bypass)
+                    if can_be_child and (course_numbers_match or sandbox_dryrun_bypass):
                         self.tree.set(item, 'child', '○')
                     else:
                         # Show tooltip reason if course numbers don't match
@@ -1411,6 +1686,34 @@ class CrosslistingGUI:
                     self.tree.set(item, 'child', '○')
                 else:
                     self.tree.set(item, 'child', '')
+
+    def show_sandbox_banner(self):
+        """Show a top banner indicating sandbox mode relaxed checks."""
+        try:
+            if hasattr(self, 'sandbox_banner') and self.sandbox_banner and self.sandbox_banner.winfo_exists():
+                return
+            self.sandbox_banner = ttk.Frame(self.root)
+            self.sandbox_banner.pack(fill=tk.X, before=self.root.winfo_children()[1])
+            label = ttk.Label(
+                self.sandbox_banner,
+                text="Sandbox detected: SOP checks are logged as warnings only.",
+                background="#fff4cc",
+                foreground="#7a5c00",
+                padding=8,
+                font=('Arial', 10, 'bold')
+            )
+            label.pack(fill=tk.X)
+            # Auto-hide after 10s
+            self.root.after(10000, self.hide_sandbox_banner)
+        except Exception:
+            pass
+
+    def hide_sandbox_banner(self):
+        try:
+            if hasattr(self, 'sandbox_banner') and self.sandbox_banner and self.sandbox_banner.winfo_exists():
+                self.sandbox_banner.destroy()
+        except Exception:
+            pass
     
     def get_parent_index(self):
         """Get the currently selected parent index."""
@@ -1508,16 +1811,19 @@ class CrosslistingGUI:
             # If the pre-check fails, proceed to validation to show errors later
             pass
 
-        # Validate the cross-listing using new validation function
+        # Validate the cross-listing using validation function; relax in sandbox mode
         validation_errors = validate_cross_listing_candidates(self.config, parent_section, child_section)
+        sandbox_active = is_sandbox_course_name(parent_section.get('course_name', '')) or is_sandbox_course_name(child_section.get('course_name', ''))
 
-        # If validation fails, surface a user-friendly message and stop before dialog
-        if validation_errors:
-            messagebox.showerror(
-                "Validation Failed",
-                "\n".join(validation_errors) or "Parent must be unpublished; Child must be published"
-            )
+        if validation_errors and not sandbox_active:
+            # Enforce strict rule: parent unpublished and child published
+            message = "\n".join(validation_errors)
+            if not message:
+                message = "Parent must be unpublished; Child must be published"
+            messagebox.showerror("Validation Failed", message)
             return
+        elif validation_errors and sandbox_active:
+            self.show_sandbox_banner()
 
         # Show confirmation dialog only when valid
         dialog = CrosslistingConfirmDialog(
@@ -1532,6 +1838,8 @@ class CrosslistingGUI:
             return
         
         # Perform the cross-listing
+        self._last_parent_index = parent_index
+        self._last_child_index = child_index
         def crosslist_thread():
             try:
                 if self._is_closing:
@@ -1596,7 +1904,12 @@ class CrosslistingGUI:
             else:
                 messagebox.showinfo("Success", message)
                 self.status_var.set("Cross-listing completed successfully")
-                # Refresh the sections table for real operations
+                # Immediate UI update without full reload
+                try:
+                    self.apply_crosslist_ui_update(self._last_parent_index, self._last_child_index)
+                except Exception:
+                    pass
+                # Also kick off a refresh to fully sync
                 self.refresh_sections()
         else:
             # Map error to friendly message if it's a CanvasAPIError
@@ -1646,6 +1959,7 @@ class CrosslistingGUI:
         ):
             return
         
+        self._last_undo_index = section_index
         def undo_thread():
             try:
                 if self._is_closing:
@@ -1693,7 +2007,11 @@ class CrosslistingGUI:
             else:
                 messagebox.showinfo("Success", message)
                 self.status_var.set("Undo completed successfully")
-                # For real operations, try partial refresh or full refresh
+                # Immediate UI update, then refresh
+                try:
+                    self.apply_undo_ui_update(self._last_undo_index)
+                except Exception:
+                    pass
                 self.refresh_sections()
         else:
             try:
@@ -1714,6 +2032,94 @@ class CrosslistingGUI:
 
         # Reload sections
         self.load_sections()
+
+    def sort_by_column(self, col, reverse: bool):
+        """Sort treeview by a given column."""
+        try:
+            data = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+            # Custom sort for icon columns
+            if col in ('published', 'cross_listed'):
+                def keyfunc(item):
+                    v = item[0]
+                    return 1 if ('Yes' in v) else 0
+                data.sort(key=keyfunc, reverse=reverse)
+            elif col in ('parent', 'child', 'undo'):
+                data.sort(key=lambda t: t[0], reverse=reverse)
+            else:
+                data.sort(key=lambda t: t[0].lower() if isinstance(t[0], str) else t[0], reverse=reverse)
+            for index, (val, k) in enumerate(data):
+                self.tree.move(k, '', index)
+            # Toggle sort next time
+            self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
+        except Exception:
+            pass
+
+    def apply_crosslist_ui_update(self, parent_index: int, child_index: int):
+        """Update the two affected rows to reflect cross-listing without full reload."""
+        if parent_index is None or child_index is None:
+            return
+        # Mark child as cross-listed and enable Undo
+        try:
+            child_item = str(child_index)
+            self.tree.set(child_item, 'cross_listed', '🔗 Yes')
+            self.tree.set(child_item, 'undo', 'Undo')
+            self.tree.item(child_item, tags=('xlisted',))
+            # Clear child radio options
+            self.tree.set(child_item, 'child', '')
+        except Exception:
+            pass
+        # Reset selections
+        self.parent_var.set('')
+        self.child_var.set('')
+        self.update_button_states()
+
+    def apply_undo_ui_update(self, section_index: int):
+        """Update a row to reflect un-cross-listing without full reload."""
+        try:
+            item = str(section_index)
+            self.tree.set(item, 'cross_listed', '❌ No')
+            self.tree.set(item, 'undo', '')
+            self.tree.item(item, tags=())
+        except Exception:
+            pass
+    
+    def toggle_dev_tools(self):
+        """Toggle the visibility of developer tools section."""
+        if self.dev_tools_visible:
+            self.dev_tools_frame.pack_forget()
+            self.toggle_dev_btn.config(text="Show Developer Tools")
+            self.dev_tools_visible = False
+        else:
+            # Pack dev tools before the about frame
+            self.dev_tools_frame.pack(fill=tk.X, pady=(0, 10), before=self.about_frame)
+            self.toggle_dev_btn.config(text="Hide Developer Tools")
+            self.dev_tools_visible = True
+    
+    def set_form_state(self, enabled):
+        """Enable or disable form elements based on term selection."""
+        state = tk.NORMAL if enabled else tk.DISABLED
+        
+        # Enable/disable form elements
+        self.instructor_entry.config(state=state)
+        self.resolve_btn.config(state=state if enabled else tk.DISABLED)
+        self.staff_toggle.config(state=state)
+        
+        # Handle course entry state and placeholder
+        if enabled and self.staff_mode.get():
+            self.course_entry.config(state=tk.NORMAL)
+            # Ensure placeholder is properly set when field becomes enabled
+            if not self.get_entry_value(self.course_entry):
+                self.course_entry.delete(0, tk.END)
+                self.course_entry.insert(0, "Canvas ID, course code, or subject (e.g. MATH, 1405, BIO)")
+                self.course_entry.config(foreground='grey')
+        else:
+            self.course_entry.config(state=tk.DISABLED)
+            
+        self.load_btn.config(state=state if enabled else tk.DISABLED)
+        
+        # Update load button state based on current selections
+        if enabled:
+            self.update_load_button_state()
     
     def show_about_dialog(self):
         """Show the about cross-listing dialog."""
@@ -1728,7 +2134,29 @@ class CrosslistingGUI:
         """Handle and display errors."""
         self.hide_progress()
         messagebox.showerror(title, message)
+        self.show_error_toast(message)
         self.status_var.set(f"Error: {title}")
+
+    def export_audit_log(self):
+        """Export the audit log CSV (logs/crosslist_audit.csv) to a chosen location."""
+        try:
+            audit_path = Path('./logs/crosslist_audit.csv')
+            if not audit_path.exists():
+                messagebox.showwarning("No Audit Log", "No audit log file found yet.")
+                return
+            default_name = f"crosslist_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialvalue=default_name,
+                title="Export Audit Log"
+            )
+            if not filename:
+                return
+            shutil.copyfile(str(audit_path), filename)
+            messagebox.showinfo("Export Complete", f"Audit log exported to:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Export Failed", f"Failed to export audit log:\n{str(e)}")
     
     def run(self):
         """Start the GUI application."""
