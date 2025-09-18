@@ -856,6 +856,7 @@ class CrosslistingGUI:
     def update_terms(self, terms):
         """Update the terms dropdown with loaded data."""
         # Filter to current and recent terms (last 3 years for relevance)
+        # Note: Keep "Default Term" entries so sandbox courses remain visible per SOP/testing needs.
         import datetime
         current_year = datetime.datetime.now().year
         recent_terms = []
@@ -1051,7 +1052,11 @@ class CrosslistingGUI:
                     sections = list_sections_for_courses(self.config, self.token_provider, courses)
 
                 # Check permissions for potential parent courses
-                course_ids = list(set(s['course_id'] for s in sections if not s.get('published')))
+                # SOP: a parent can be unpublished OR published with zero students. Include both in checks.
+                course_ids = list(set(
+                    s['course_id'] for s in sections
+                    if (not s.get('published')) or (s.get('total_students', 0) == 0)
+                ))
                 permissions_map = check_course_permissions(self.config, self.token_provider, course_ids) if course_ids else {}
 
                 # Format for UI
@@ -1506,7 +1511,15 @@ class CrosslistingGUI:
         # Validate the cross-listing using new validation function
         validation_errors = validate_cross_listing_candidates(self.config, parent_section, child_section)
 
-        # Show confirmation dialog
+        # If validation fails, surface a user-friendly message and stop before dialog
+        if validation_errors:
+            messagebox.showerror(
+                "Validation Failed",
+                "\n".join(validation_errors) or "Parent must be unpublished; Child must be published"
+            )
+            return
+
+        # Show confirmation dialog only when valid
         dialog = CrosslistingConfirmDialog(
             self.root,
             parent_section,
@@ -1516,10 +1529,6 @@ class CrosslistingGUI:
         )
 
         if not dialog.show():
-            return
-
-        if validation_errors:
-            # Errors already shown in dialog
             return
         
         # Perform the cross-listing

@@ -279,13 +279,14 @@ class CanvasAPIClient:
                         data = [response]
                     
                     if not data:
-                        break
+                        # No data on this page – treat as end of pagination to avoid looping on page 1
+                        return all_data
                     
                     # Check for duplicate data (indicates API is returning same page repeatedly)
                     data_hash = hash(str(sorted([item.get('id', 0) for item in data if isinstance(item, dict)])))
                     if data_hash in seen_data_hashes:
                         logger.warning(f"Detected duplicate data on page {page}. Stopping pagination.")
-                        break
+                        return all_data
                     seen_data_hashes.add(data_hash)
                     
                     all_data.extend(data)
@@ -293,7 +294,8 @@ class CanvasAPIClient:
                     
                     # Check if we have more pages
                     if len(data) < self.config.per_page:
-                        break
+                        # Last page (short page)
+                        return all_data
                     
                     page += 1
                     break  # Success, move to next page
@@ -318,8 +320,9 @@ class CanvasAPIClient:
                         logger.error(f"Failed to fetch page {page} after {self.config.max_retries} attempts")
                         if consecutive_errors >= max_consecutive_errors:
                             logger.error(f"Too many consecutive errors ({consecutive_errors}). Stopping pagination.")
-                            break
-                        break  # Move to next page even if this one failed
+                            return all_data
+                        # Give up on this page and stop pagination to avoid re-fetching the same page forever
+                        return all_data
         
         logger.info(f"Retrieved {len(all_data)} total items")
         return all_data
@@ -625,9 +628,11 @@ def list_account_courses_filtered(
         "per_page": config.per_page
     }
     # Prefer state[] semantics; include unpublished + available when browsing
+    # SOP requires allowing unpublished (Canvas "created") courses to appear initially.
     if only_published:
         effective_states = ["available"]
     else:
+        # Include both unpublished (created) and available so potential parents are not filtered out upfront
         effective_states = states if states else ["unpublished", "available"]
     for st in effective_states:
         params.setdefault("state[]", []).append(st)
@@ -657,7 +662,11 @@ def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider:
         "per_page": config.per_page
     }
     logger.info(f"Fetching enrollments for user {user_id} in term {term_id}")
-    enrollments = client.get_paginated_data(enroll_path, enroll_params, max_pages=5)  # Limit pages to prevent infinite loops
+    # Limit pages and protect against empty/looping responses from Canvas
+    enrollments = client.get_paginated_data(enroll_path, enroll_params, max_pages=5)
+    if not enrollments:
+        logger.info("No enrollments returned; exiting early to avoid pagination loops")
+        return []
     logger.info(f"Found {len(enrollments)} enrollments")
     course_ids = sorted({e.get("course_id") for e in enrollments if e.get("course_id")})
     logger.info(f"Extracted {len(course_ids)} unique course IDs: {course_ids}")
@@ -688,6 +697,8 @@ def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider:
                         courses.append(course)
                 except Exception as e:
                     logger.warning(f"Failed to get course result: {e}")
+    else:
+        logger.info("No courses found from enrollments; returning empty list")
 
     return courses
 
@@ -870,12 +881,13 @@ def validate_cross_listing_candidates(config: CanvasConfig, parent_section: Dict
     if parent_section['course_id'] == child_section['course_id']:
         errors.append("Cannot cross-list sections from the same course")
 
-    # Policy-based validation
-    if config.require_parent_unpublished and parent_section.get('published'):
-        errors.append("Parent course must be unpublished")
-
-    if config.forbid_parent_with_students and parent_section.get('total_students', 0) > 0:
-        errors.append("Parent course must not have students enrolled")
+    # Policy-based validation (SOP): parent must be UNPUBLISHED OR have no student activity
+    # We enforce the OR by only failing when BOTH conditions are violated simultaneously.
+    if config.require_parent_unpublished or config.forbid_parent_with_students:
+        parent_is_published = parent_section.get('published')
+        parent_has_students = (parent_section.get('total_students', 0) > 0)
+        if parent_is_published and parent_has_students:
+            errors.append("Parent must be unpublished OR have no student activity")
 
     # Child must be published
     if not child_section.get('published'):
@@ -1353,7 +1365,8 @@ def format_sections_for_ui(sections: List[Dict[str, Any]], permissions_map: Opti
         cross_listed = section.get('cross_listed', False)
 
         # Determine parent/child candidate status
-        parent_candidate = not published and not cross_listed
+        # SOP: A parent is valid if it is unpublished OR has zero students (even if published), and not already cross-listed.
+        parent_candidate = ((not published) or (section.get('total_students', 0) == 0)) and not cross_listed
         child_candidate = published and not cross_listed
 
         # Check permission block
