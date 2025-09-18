@@ -1535,7 +1535,7 @@ class CrosslistingGUI:
                 # Get instructor and term info for audit
                 instructor_id = self.current_instructor['id'] if self.current_instructor else None
 
-            success = cross_list_section(
+                success = cross_list_section(
                     self.config, self.token_provider,
                     child_section['section_id'],
                     parent_section['course_id'],
