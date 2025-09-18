@@ -386,6 +386,12 @@ def extract_course_number(course_code: str) -> str:
     return match.group(1) if match else course_code
 
 
+def get_section(config: CanvasConfig, token_provider: TokenProvider, section_id: int, as_user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Fetch a single section by id from Canvas."""
+    client = CanvasAPIClient(token_provider, config, as_user_id)
+    return client._make_request('GET', f'/api/v1/sections/{section_id}')
+
+
 def get_config() -> CanvasConfig:
     """Get Canvas API configuration from environment variables."""
     api_token = os.getenv('CANVAS_API_TOKEN')
@@ -512,7 +518,7 @@ def resolve_instructor(config: CanvasConfig, term_id: int, user_key: str, token_
             enroll_path = f"/api/v1/users/{user_id}/enrollments"
             enroll_params = {
                 "type[]": "TeacherEnrollment",
-                "enrollment_state": "active",
+                "state[]": "active",
                 "enrollment_term_id": term_id
             }
             try:
@@ -591,15 +597,17 @@ def list_account_courses_filtered(
     params: dict = {
         "enrollment_term_id": term_id,
         "with_enrollments": "true",
-        "include[]": ["sections", "term", "teachers", "account_name", "total_students"],
+        # Do not request sections at the account endpoint; keep term/account_name
+        "include[]": ["term", "account_name"],
         "per_page": config.per_page
     }
-    # States default: available (and optionally created)
-    effective_states = states if states else ["available"]
+    # Prefer state[] semantics; include unpublished + available when browsing
+    if only_published:
+        effective_states = ["available"]
+    else:
+        effective_states = states if states else ["unpublished", "available"]
     for st in effective_states:
         params.setdefault("state[]", []).append(st)
-    if only_published:
-        params["published"] = "true"
     if teacher_ids:
         for tid in teacher_ids:
             params.setdefault("by_teachers[]", []).append(tid)
@@ -621,7 +629,7 @@ def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider:
     enroll_path = f"/api/v1/users/{user_id}/enrollments"
     enroll_params = {
         "type[]": "TeacherEnrollment",
-        "enrollment_state": "active",
+        "state[]": "active",
         "enrollment_term_id": term_id,
         "per_page": config.per_page
     }
@@ -679,14 +687,28 @@ def list_sections_for_courses(config: CanvasConfig, token_provider: TokenProvide
         if not cid:
             continue
 
-        # Prefer course["sections"] when present, otherwise fetch
-        sections_data = course.get("sections")
-        if not sections_data:
-            sections_data = client.get_paginated_data(f"/api/v1/courses/{cid}/sections", {"per_page": config.per_page})
+        # Hydrate teachers/total_students if not present on the course object
+        teachers_for_course = course.get("teachers")
+        total_students_for_course = course.get("total_students")
+        if not teachers_for_course or total_students_for_course is None:
+            try:
+                course_resp = client._make_request(
+                    "GET",
+                    f"/api/v1/courses/{cid}",
+                    params={"include[]": ["teachers", "total_students"]}
+                )
+                teachers_for_course = course_resp.get("teachers", teachers_for_course or [])
+                total_students_for_course = course_resp.get("total_students", total_students_for_course or 0)
+            except CanvasAPIError:
+                teachers_for_course = teachers_for_course or []
+                total_students_for_course = total_students_for_course or 0
+
+        # Always fetch sections from the course endpoint
+        sections_data = client.get_paginated_data(f"/api/v1/courses/{cid}/sections", {"per_page": config.per_page})
 
         for s in sections_data or []:
-            # Standardize cross-list detection
-            cross_listed = bool(s.get("cross_listing_id")) or bool(s.get("nonxlist_course_id")) or (
+            # Standardize cross-list detection per sections API fields
+            cross_listed = bool(s.get("cross_listing_id")) or (
                 s.get("nonxlist_course_id") is not None and s.get("nonxlist_course_id") != s.get("course_id")
             )
 
@@ -700,10 +722,10 @@ def list_sections_for_courses(config: CanvasConfig, token_provider: TokenProvide
                 "sis_section_id": s.get("sis_section_id"),
                 "workflow_state": course.get("workflow_state"),
                 "published": course.get("workflow_state") == "available",
-                "teachers": course.get("teachers", []),
+                "teachers": teachers_for_course or [],
                 "cross_listed": cross_listed,
                 "parent_course_id": s.get("parent_course_id"),
-                "total_students": course.get("total_students", 0),
+                "total_students": total_students_for_course or 0,
                 "subaccount_id": course.get("account_id"),
                 "full_title": f"{course.get('course_code')}: {course.get('name')}: Section {s.get('name')}"
             }
@@ -889,9 +911,37 @@ def log_audit_action(actor_as_user_id: Optional[int], term_id: int, instructor_i
 
 def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, child_section_id: int, parent_course_id: int,
                       dry_run: bool = False, term_id: Optional[int] = None, instructor_id: Optional[int] = None,
-                      as_user_id: Optional[int] = None) -> bool:
+                      as_user_id: Optional[int] = None, override_sis_stickiness: bool = True) -> bool:
     """Cross-list a child section into a parent course."""
     action = "cross_list"
+
+    # Pre-move guard: fetch authoritative section details
+    try:
+        pre_section = get_section(config, token_provider, child_section_id, as_user_id)
+    except CanvasAPIError as e:
+        message = f"Failed to fetch section before cross-list: {e.message}"
+        logger.error(message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message)
+        return False
+
+    current_course_id = pre_section.get('course_id')
+    original_course_id = pre_section.get('nonxlist_course_id')
+
+    # No-op if already in the target parent course
+    if current_course_id == parent_course_id:
+        message = f"Section {child_section_id} already belongs to course {parent_course_id} (no-op)"
+        logger.info(message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", dry_run, message)
+        return True
+
+    # If already cross-listed, surface clearer message
+    if original_course_id is not None and original_course_id != current_course_id:
+        message = (
+            f"Section {child_section_id} is already cross-listed (original course {original_course_id}, current {current_course_id})."
+        )
+        logger.error(message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", dry_run, message)
+        return False
 
     if dry_run:
         message = f"DRY RUN: Would cross-list section {child_section_id} into course {parent_course_id}"
@@ -902,18 +952,26 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
     client = CanvasAPIClient(token_provider, config, as_user_id)
 
     try:
-        path = f"/api/v1/sections/{child_section_id}/crosslist"
-        data = {
-            'new_course_id': parent_course_id
-        }
+        path = f"/api/v1/sections/{child_section_id}/crosslist/{parent_course_id}"
+        params = {"override_sis_stickiness": str(override_sis_stickiness).lower()} if override_sis_stickiness else None
 
         print(f"🔄 Cross-listing section {child_section_id} into course {parent_course_id}...")
-        response = client._make_request('POST', path, data=data)
+        _ = client._make_request('POST', path, params=params)
 
-        message = f"Successfully cross-listed section {child_section_id}"
-        print(f"✅ {message}")
-        log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", False, message)
-        return True
+        # Post-move verification
+        post_section = get_section(config, token_provider, child_section_id, as_user_id)
+        if post_section.get('course_id') == parent_course_id:
+            message = f"Successfully cross-listed section {child_section_id} into course {parent_course_id}"
+            print(f"✅ {message}")
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "success", False, message)
+            return True
+        else:
+            message = (
+                f"Post-verification failed: section {child_section_id} course_id is {post_section.get('course_id')} not {parent_course_id}"
+            )
+            logger.error(message)
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, parent_course_id, child_section_id, "error", False, message)
+            return False
 
     except CanvasAPIError as e:
         message = f"Failed to cross-list section: {e.message}"
@@ -924,9 +982,28 @@ def cross_list_section(config: CanvasConfig, token_provider: TokenProvider, chil
 
 def un_cross_list_section(config: CanvasConfig, token_provider: TokenProvider, section_id: int,
                          dry_run: bool = False, term_id: Optional[int] = None, instructor_id: Optional[int] = None,
-                         as_user_id: Optional[int] = None) -> bool:
+                         as_user_id: Optional[int] = None, override_sis_stickiness: bool = True) -> bool:
     """Un-cross-list a section (remove it from cross-listing)."""
     action = "un_cross_list"
+
+    # Pre-undo details
+    try:
+        pre_section = get_section(config, token_provider, section_id, as_user_id)
+    except CanvasAPIError as e:
+        message = f"Failed to fetch section before un-cross-list: {e.message}"
+        logger.error(message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, None, section_id, "error", dry_run, message)
+        return False
+
+    pre_course_id = pre_section.get('course_id')
+    pre_nonx = pre_section.get('nonxlist_course_id')
+
+    # If not cross-listed (no nonxlist_course_id), nothing to undo
+    if pre_nonx is None:
+        message = f"Section {section_id} is not cross-listed (no-op)"
+        logger.info(message)
+        log_audit_action(as_user_id, term_id or 0, instructor_id, action, None, section_id, "success", dry_run, message)
+        return True
 
     if dry_run:
         message = f"DRY RUN: Would un-cross-list section {section_id}"
@@ -938,14 +1015,26 @@ def un_cross_list_section(config: CanvasConfig, token_provider: TokenProvider, s
 
     try:
         path = f"/api/v1/sections/{section_id}/crosslist"
+        params = {"override_sis_stickiness": str(override_sis_stickiness).lower()} if override_sis_stickiness else None
 
         print(f"🔄 Un-cross-listing section {section_id}...")
-        response = client._make_request('DELETE', path)
+        _ = client._make_request('DELETE', path, params=params)
 
-        message = f"Successfully un-cross-listed section {section_id}"
-        print(f"✅ {message}")
-        log_audit_action(as_user_id, term_id or 0, instructor_id, action, None, section_id, "success", False, message)
-        return True
+        # Post-undo verification
+        post_section = get_section(config, token_provider, section_id, as_user_id)
+        post_course_id = post_section.get('course_id')
+        if (pre_nonx is not None and post_course_id == pre_nonx) or (post_course_id != pre_course_id):
+            message = f"Successfully un-cross-listed section {section_id}"
+            print(f"✅ {message}")
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, None, section_id, "success", False, message)
+            return True
+        else:
+            message = (
+                f"Post-verification failed: section {section_id} course_id is {post_course_id} (expected revert to {pre_nonx} or change from {pre_course_id})"
+            )
+            logger.error(message)
+            log_audit_action(as_user_id, term_id or 0, instructor_id, action, None, section_id, "error", False, message)
+            return False
 
     except CanvasAPIError as e:
         message = f"Failed to un-cross-list section: {e.message}"
@@ -1116,7 +1205,8 @@ class CrosslistingService:
         self.client = CanvasAPIClient(token_provider, config, as_user_id)
     
     def crosslist_sections(self, child_section_id: int, parent_course_id: int, dry_run: bool = False,
-                          term_id: Optional[int] = None, instructor_id: Optional[int] = None) -> Tuple[bool, str]:
+                          term_id: Optional[int] = None, instructor_id: Optional[int] = None,
+                          override_sis_stickiness: bool = True) -> Tuple[bool, str]:
         """
         Simple interface for crosslisting - similar to myCanvasInterface.CrossListSections()
 
@@ -1132,7 +1222,7 @@ class CrosslistingService:
         """
         try:
             success = cross_list_section(self.config, self.token_provider, child_section_id, parent_course_id,
-                                       dry_run, term_id, instructor_id, self.as_user_id)
+                                       dry_run, term_id, instructor_id, self.as_user_id, override_sis_stickiness)
             if success:
                 action = "DRY RUN: Would cross-list" if dry_run else "Successfully cross-listed"
                 return True, f"{action} section {child_section_id} into course {parent_course_id}"
@@ -1142,7 +1232,8 @@ class CrosslistingService:
             return False, f"Error during cross-listing: {str(e)}"
     
     def uncrosslist_section(self, section_id: int, dry_run: bool = False,
-                           term_id: Optional[int] = None, instructor_id: Optional[int] = None) -> Tuple[bool, str]:
+                           term_id: Optional[int] = None, instructor_id: Optional[int] = None,
+                           override_sis_stickiness: bool = True) -> Tuple[bool, str]:
         """
         Simple interface for un-crosslisting
 
@@ -1157,7 +1248,7 @@ class CrosslistingService:
         """
         try:
             success = un_cross_list_section(self.config, self.token_provider, section_id,
-                                          dry_run, term_id, instructor_id, self.as_user_id)
+                                          dry_run, term_id, instructor_id, self.as_user_id, override_sis_stickiness)
             if success:
                 action = "DRY RUN: Would un-cross-list" if dry_run else "Successfully un-cross-listed"
                 return True, f"{action} section {section_id}"

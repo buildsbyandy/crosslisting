@@ -23,7 +23,7 @@ from standalone_crosslisting_tool import (
     list_account_courses_filtered, list_sections_for_courses,
     format_sections_for_ui, cross_list_section, un_cross_list_section,
     check_course_permissions, EnvTokenProvider, extract_course_number,
-    export_sections_to_csv
+    export_sections_to_csv, get_section
 )
 
 
@@ -1480,6 +1480,22 @@ class CrosslistingGUI:
         parent_section = self.sections[parent_index]
         child_section = self.sections[child_index]
         
+        # Pre-move authoritative check to block no-ops/already moved
+        try:
+            pre_child = get_section(self.config, self.token_provider, child_section['section_id'], self.as_user_id)
+            if pre_child.get('course_id') == parent_section['course_id']:
+                messagebox.showinfo("No-op", "This section already belongs to the selected parent course.")
+                return
+            if pre_child.get('nonxlist_course_id') is not None and pre_child.get('nonxlist_course_id') != pre_child.get('course_id'):
+                messagebox.showerror(
+                    "Already Cross-listed",
+                    f"This section is already cross-listed (original course {pre_child.get('nonxlist_course_id')})."
+                )
+                return
+        except Exception:
+            # If the pre-check fails, proceed to validation to show errors later
+            pass
+
         # Validate the cross-listing using new validation function
         validation_errors = validate_cross_listing_candidates(self.config, parent_section, child_section)
 
@@ -1512,14 +1528,15 @@ class CrosslistingGUI:
                 # Get instructor and term info for audit
                 instructor_id = self.current_instructor['id'] if self.current_instructor else None
 
-                success = cross_list_section(
+            success = cross_list_section(
                     self.config, self.token_provider,
                     child_section['section_id'],
                     parent_section['course_id'],
                     dry_run=self.dry_run.get(),
                     term_id=self.selected_term_id,
                     instructor_id=instructor_id,
-                    as_user_id=self.as_user_id
+                    as_user_id=self.as_user_id,
+                    override_sis_stickiness=True
                 )
 
                 if self.dry_run.get():
@@ -1616,7 +1633,8 @@ class CrosslistingGUI:
                     dry_run=self.dry_run.get(),
                     term_id=self.selected_term_id,
                     instructor_id=instructor_id,
-                    as_user_id=self.as_user_id
+                    as_user_id=self.as_user_id,
+                    override_sis_stickiness=True
                 )
 
                 if self.dry_run.get():
