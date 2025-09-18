@@ -23,7 +23,7 @@ from standalone_crosslisting_tool import (
     CanvasAPIError, resolve_instructor, list_user_term_courses_via_enrollments,
     list_account_courses_filtered, list_sections_for_courses,
     format_sections_for_ui, cross_list_section, un_cross_list_section,
-        check_course_permissions, EnvTokenProvider, extract_course_number,
+        check_course_permissions, OAuthTokenProvider, extract_course_number,
     export_sections_to_csv, get_section, summarize_crosslist_changes
 )
 from standalone_crosslisting_tool import is_sandbox_course_name
@@ -236,7 +236,7 @@ class CrosslistingConfirmDialog:
         self.dialog = tk.Toplevel(self.parent)
         title = "Confirm Cross-listing (DRY RUN)" if self.dry_run else "Confirm Cross-listing"
         self.dialog.title(title)
-        self.dialog.geometry("500x400")
+        self.dialog.geometry("600x500")
         self.dialog.resizable(False, False)
 
         # Make it modal
@@ -294,19 +294,24 @@ class CrosslistingConfirmDialog:
             status_label.pack(anchor=tk.W)
 
             # Acknowledgment checkboxes
-            ack_frame = ttk.LabelFrame(main_frame, text="Required Acknowledgments")
+            ack_frame = ttk.LabelFrame(main_frame, text="Before proceeding, you must acknowledge the following:")
             ack_frame.pack(fill=tk.X, pady=(15, 15))
 
             self.ack1_var = tk.BooleanVar()
             self.ack2_var = tk.BooleanVar()
+            self.ack3_var = tk.BooleanVar()
 
-            ack1_text = "I understand that cross-listing will merge the child section into the parent course"
+            ack1_text = "I have approval from my associate dean or director."
             ack1_cb = ttk.Checkbutton(ack_frame, text=ack1_text, variable=self.ack1_var, command=self.update_confirm_button)
             ack1_cb.pack(anchor=tk.W, padx=10, pady=5)
 
-            ack2_text = "I have verified that both sections contain the same course content"
+            ack2_text = "I have completed my Concourse syllabus for both courses and understand that I will no longer have access to the child course."
             ack2_cb = ttk.Checkbutton(ack_frame, text=ack2_text, variable=self.ack2_var, command=self.update_confirm_button)
             ack2_cb.pack(anchor=tk.W, padx=10, pady=5)
+
+            ack3_text = "⚠️ Important: Copy your Concourse syllabus template before cross-listing. If you don't, your template will be overwritten and lost."
+            ack3_cb = ttk.Checkbutton(ack_frame, text=ack3_text, variable=self.ack3_var, command=self.update_confirm_button)
+            ack3_cb.pack(anchor=tk.W, padx=10, pady=5)
 
             if self.dry_run:
                 dry_run_note = ttk.Label(
@@ -340,14 +345,14 @@ class CrosslistingConfirmDialog:
 
         # Center the dialog
         self.dialog.update_idletasks()
-        x = (self.dialog.winfo_screenwidth() // 2) - (500 // 2)
-        y = (self.dialog.winfo_screenheight() // 2) - (400 // 2)
-        self.dialog.geometry(f"500x400+{x}+{y}")
+        x = (self.dialog.winfo_screenwidth() // 2) - (600 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (500 // 2)
+        self.dialog.geometry(f"600x500+{x}+{y}")
 
     def update_confirm_button(self):
         """Update confirm button state based on acknowledgments."""
-        if hasattr(self, 'confirm_btn') and hasattr(self, 'ack1_var') and hasattr(self, 'ack2_var'):
-            if self.ack1_var.get() and self.ack2_var.get():
+        if hasattr(self, 'confirm_btn') and hasattr(self, 'ack1_var') and hasattr(self, 'ack2_var') and hasattr(self, 'ack3_var'):
+            if self.ack1_var.get() and self.ack2_var.get() and self.ack3_var.get():
                 self.confirm_btn.config(state=tk.NORMAL)
             else:
                 self.confirm_btn.config(state=tk.DISABLED)
@@ -659,7 +664,7 @@ class CrosslistingGUI:
         # Row 2: Staff mode toggle and search
         self.staff_toggle = ttk.Checkbutton(
             filter_grid,
-            text="Browse all courses in term (staff mode)",
+            text="Search courses in term (staff mode)",
             variable=self.staff_mode,
             command=self.on_staff_mode_toggle
         )
@@ -685,8 +690,8 @@ class CrosslistingGUI:
         
         # Help text for search
         self.search_help = ttk.Label(
-            search_frame, 
-            text="Ex: 'MATH' finds all Math courses, '1405' finds courses with 1405, 'BIO' finds Biology courses",
+            search_frame,
+            text="Requires at least 2 characters. Searches by course code or name. Results depend on your account-level permissions.",
             font=('Arial', 8),
             foreground='gray'
         )
@@ -903,7 +908,7 @@ class CrosslistingGUI:
         """Load Canvas API configuration."""
         try:
             self.config = get_config()
-            self.token_provider = EnvTokenProvider()
+            self.token_provider = OAuthTokenProvider()
             self.service = CrosslistingService(self.config, self.token_provider, self.as_user_id)
             self.status_var.set("Configuration loaded successfully")
         except Exception as e:
@@ -1440,8 +1445,11 @@ class CrosslistingGUI:
         self.clear_sections_table()
 
         if not self.sections:
-            # Show placeholder row
-            placeholder = "No courses found for this instructor in the selected term."
+            # Show placeholder row with appropriate message based on mode
+            if self.staff_mode.get():
+                placeholder = "No results found for this search term. Try broadening your search or check your account permissions."
+            else:
+                placeholder = "No courses found for this instructor in the selected term."
             self.tree.insert('', 'end', values=('', '', placeholder, '', '', ''))
             self.status_var.set("No sections found")
             return

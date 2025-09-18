@@ -49,6 +49,10 @@ try:
 except ImportError:
     pass
 
+# Token caching for OAuth2 client credentials
+_cached_token = None
+_token_expiry = None
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -65,22 +69,135 @@ class TokenProvider(Protocol):
 
 
 class EnvTokenProvider:
-    """Token provider that reads from environment variable."""
+    """Deprecated: Token provider that reads from environment variable.
+
+    This class is deprecated and provided for backwards compatibility only.
+    Use OAuthTokenProvider for OAuth2 client credentials flow instead.
+    """
     def __init__(self, env_var: str = 'CANVAS_API_TOKEN'):
         self.env_var = env_var
 
     def get_token(self) -> str:
         token = os.getenv(self.env_var)
         if not token or token == 'PLACEHOLDERAPIKEY':
-            raise ValueError(f"API token not found in environment variable {self.env_var}")
+            raise ValueError(f"API token not found in environment variable {self.env_var}. Please use OAuth2 client credentials (CANVAS_CLIENT_ID and CANVAS_CLIENT_SECRET) instead.")
         return token
 
 
-class OAuthSessionTokenProvider:
-    """Placeholder OAuth token provider - returns dummy token for now."""
+def get_canvas_token() -> str:
+    """
+    Get Canvas access token using OAuth2 client credentials flow.
+
+    Reads CANVAS_CLIENT_ID, CANVAS_CLIENT_SECRET, and CANVAS_BASE_URL from environment.
+    Caches the token in memory for the session run.
+
+    Returns:
+        str: Access token for Canvas API
+
+    Raises:
+        ValueError: If required environment variables are missing
+        CanvasAPIError: If token request fails
+    """
+    global _cached_token, _token_expiry
+
+    # Check if we have a valid cached token
+    if _cached_token and _token_expiry:
+        import time
+        if time.time() < _token_expiry:
+            return _cached_token
+
+    # Get required environment variables
+    client_id = os.getenv('CANVAS_CLIENT_ID')
+    client_secret = os.getenv('CANVAS_CLIENT_SECRET')
+    base_url = os.getenv('CANVAS_BASE_URL')
+
+    if not client_id:
+        raise ValueError("CANVAS_CLIENT_ID environment variable is required")
+    if not client_secret:
+        raise ValueError("CANVAS_CLIENT_SECRET environment variable is required")
+    if not base_url:
+        raise ValueError("CANVAS_BASE_URL environment variable is required")
+
+    # Prepare OAuth2 request
+    token_url = f"{base_url.rstrip('/')}/login/oauth2/token"
+
+    # Parse URL for connection
+    parsed_url = urllib.parse.urlparse(token_url)
+    host = parsed_url.netloc
+    port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
+    path = parsed_url.path
+
+    # Prepare form data
+    form_data = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret
+    }
+
+    # Encode form data
+    encoded_data = urllib.parse.urlencode(form_data).encode('utf-8')
+
+    # Create connection
+    if parsed_url.scheme == 'https':
+        conn = http.client.HTTPSConnection(host, port, timeout=30)
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=30)
+
+    try:
+        # Set headers for form submission
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json'
+        }
+
+        # Make request
+        conn.request('POST', path, body=encoded_data, headers=headers)
+        response = conn.getresponse()
+        response_body = response.read().decode('utf-8')
+
+        if response.status == 200:
+            try:
+                token_data = json.loads(response_body)
+                access_token = token_data.get('access_token')
+                if not access_token:
+                    raise CanvasAPIError("No access_token in response", response.status, response_body, token_url)
+
+                # Cache the token (assume 1 hour expiry if not provided)
+                expires_in = token_data.get('expires_in', 3600)  # Default 1 hour
+                import time
+                _cached_token = access_token
+                _token_expiry = time.time() + expires_in - 60  # Refresh 1 minute early
+
+                logger.info("Successfully obtained Canvas access token via OAuth2")
+                return access_token
+
+            except json.JSONDecodeError as e:
+                raise CanvasAPIError(f"Invalid JSON response from token endpoint: {e}", response.status, response_body, token_url)
+        else:
+            logger.error(f"OAuth2 token request failed: {response.status} {response.reason}")
+            raise CanvasAPIError(
+                f"OAuth2 token request failed: {response.status} {response.reason}",
+                response.status,
+                response_body,
+                token_url
+            )
+
+    except (http.client.HTTPException, OSError) as e:
+        raise CanvasAPIError(f"Network error during token request: {e}", request_url=token_url)
+    finally:
+        conn.close()
+
+
+class OAuthTokenProvider:
+    """Token provider that uses OAuth2 client credentials flow."""
     def get_token(self) -> str:
-        # TODO: Implement OAuth flow
-        return "dummy_oauth_token"
+        return get_canvas_token()
+
+
+class OAuthSessionTokenProvider:
+    """Deprecated: Use OAuthTokenProvider instead."""
+    def get_token(self) -> str:
+        return get_canvas_token()
 
 
 @dataclass
@@ -102,12 +219,14 @@ class CanvasConfig:
     
     def __post_init__(self):
         """Validate configuration after initialization."""
-        if not self.api_token or self.api_token == 'PLACEHOLDERAPIKEY':
-            raise ValueError("API token is required and cannot be placeholder")
-        
+        # OAuth2 tokens will be validated by token provider
+        # Skip token validation in config - just ensure placeholder is set
+        if not self.api_token:
+            self.api_token = "oauth2_placeholder"
+
         if not self.base_url:
             raise ValueError("Base URL is required")
-        
+
         # Ensure base URL doesn't end with slash
         self.base_url = self.base_url.rstrip('/')
 
@@ -404,7 +523,7 @@ def is_sandbox_course_name(course_name: Optional[str]) -> bool:
     """Detect sandbox courses by name.
 
     A course is considered a sandbox if its name matches:
-    ^Sandbox Course \d+ for [A-Za-z0-9._-]+
+    ^Sandbox Course \\d+ for [A-Za-z0-9._-]+
     """
     if not course_name:
         return False
@@ -435,8 +554,11 @@ def update_course_fields(config: CanvasConfig, token_provider: TokenProvider, co
 
 def get_config() -> CanvasConfig:
     """Get Canvas API configuration from environment variables."""
-    api_token = os.getenv('CANVAS_API_TOKEN')
+    # OAuth2 client credentials will be handled by token provider
+    # Just validate that base URL is available
     base_url = os.getenv('CANVAS_BASE_URL')
+    if not base_url:
+        raise ValueError("CANVAS_BASE_URL environment variable is required")
 
     # Read optional settings with defaults
     try:
@@ -476,8 +598,11 @@ def get_config() -> CanvasConfig:
     enforce_same_term = os.getenv('ENFORCE_SAME_TERM', 'true').lower() == 'true'
     default_override_sis_stickiness = os.getenv('DEFAULT_OVERRIDE_SIS_STICKINESS', 'true').lower() == 'true'
 
+    # Use placeholder token - actual token will be provided by TokenProvider
+    placeholder_token = "oauth2_placeholder"
+
     return CanvasConfig(
-        api_token=api_token,
+        api_token=placeholder_token,
         base_url=base_url,
         account_id=account_id,
         per_page=per_page,
@@ -487,8 +612,7 @@ def get_config() -> CanvasConfig:
         retry_delay=retry_delay,
         require_parent_unpublished=require_parent_unpublished,
         forbid_parent_with_students=forbid_parent_with_students,
-        enforce_same_subaccount=enforce_same_subaccount
-        ,
+        enforce_same_subaccount=enforce_same_subaccount,
         enforce_same_term=enforce_same_term,
         default_override_sis_stickiness=default_override_sis_stickiness
     )
@@ -1651,7 +1775,7 @@ def main():
     # Load configuration
     try:
         config = get_config()
-        token_provider = EnvTokenProvider()
+        token_provider = OAuthTokenProvider()
     except ValueError as e:
         print(f"❌ Configuration Error: {e}")
         return
@@ -1962,7 +2086,7 @@ def simple_crosslist_example():
     """Example of using the service like myCanvasInterface.CrossListSections()"""
     try:
         config = get_config()
-        token_provider = EnvTokenProvider()
+        token_provider = OAuthTokenProvider()
         service = CrosslistingService(config, token_provider)
 
         # Simple API call like VB.NET pattern
