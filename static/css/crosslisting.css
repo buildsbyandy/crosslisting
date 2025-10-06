@@ -1,0 +1,206 @@
+/* Cross-listing Page Styles */
+
+/* Row Highlighting - Use outline instead of background color */
+tr.parent-selected {
+    outline: 3px solid #28a745; /* Green outline */
+    outline-offset: -3px;
+}
+
+tr.child-selected {
+    outline: 3px solid #17a2b8; /* Blue outline */
+    outline-offset: -3px;
+}
+
+tr.disabled-row {
+    /* Removed opacity/gray-out - rows are now fully visible until selection */
+}
+
+/* Column Headers */
+th.parent-column,
+th.child-column {
+    background-color: #e9ecef;
+    font-weight: 600;
+}
+
+/* Selection Summary Card */
+.selection-summary {
+    border: 2px solid #007bff;
+    border-radius: 8px;
+    padding: 0.75rem 1rem; /* Reduced padding */
+    margin: 1rem 0; /* Reduced margin */
+    background-color: #f8f9fa;
+}
+
+.selection-summary h6 {
+    color: #495057;
+    font-weight: 600;
+    margin-bottom: 0.25rem; /* Reduced spacing */
+}
+
+.selection-summary .summary-item {
+    margin-bottom: 0.4rem; /* Reduced spacing */
+    padding: 0.3rem 0.5rem; /* Reduced padding */
+    background-color: white;
+    border-radius: 4px;
+    border-left: 3px solid #007bff;
+}
+
+.selection-summary .summary-item strong {
+    display: inline-block;
+    width: 80px;
+    color: #495057;
+}
+
+.selection-summary .summary-item .value {
+    color: #212529;
+}
+
+.selection-summary .summary-item .none {
+    color: #6c757d;
+    font-style: italic;
+}
+
+/* Pills/Badges */
+.badge {
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.35em 0.65em;
+}
+
+.badge.published-yes {
+    background-color: #28a745;
+    color: white;
+}
+
+.badge.published-no {
+    background-color: #6c757d;
+    color: white;
+}
+
+.badge.crosslisted-yes {
+    background-color: #ffc107;
+    color: #212529;
+}
+
+.badge.crosslisted-no {
+    background-color: #e9ecef;
+    color: #495057;
+}
+
+/* Submit Button States */
+#submitBtn {
+    transition: all 0.3s ease;
+    min-width: 300px;
+}
+
+#submitBtn:disabled {
+    background-color: #6c757d;
+    border-color: #6c757d;
+    cursor: not-allowed;
+    opacity: 0.65;
+}
+
+#submitBtn:not(:disabled):hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+
+/* Instructions Panel */
+.instructions-panel {
+    border-left: 4px solid #17a2b8;
+    padding-left: 1rem;
+}
+
+.instructions-panel ol {
+    margin-bottom: 0;
+}
+
+.instructions-panel ol li {
+    margin-bottom: 0.5rem;
+}
+
+/* Table Improvements */
+.table-hover tbody tr {
+    cursor: pointer;
+    transition: outline 0.2s ease;
+}
+
+.table-hover tbody tr:hover {
+    background-color: #f1f3f5;
+}
+
+/* Increase table width - use more of the available space */
+.col-lg-11 {
+    flex: 0 0 auto;
+    width: 95%; /* Increased from default 91.66% */
+}
+
+/* Reduce row padding for more compact display */
+.table > :not(caption) > * > * {
+    padding: 0.4rem 0.5rem; /* Reduced from default 0.5rem */
+}
+
+.table thead th {
+    padding: 0.5rem 0.5rem; /* Slightly more padding for headers */
+}
+
+/* Radio and Checkbox Styling */
+.form-check-input {
+    cursor: pointer;
+    width: 1.25rem;
+    height: 1.25rem;
+    border: 2px solid #000; /* Black outline */
+}
+
+.form-check-input:checked {
+    background-color: #0d6efd;
+    border-color: #000; /* Keep black outline when checked */
+}
+
+.form-check-input:disabled {
+    cursor: not-allowed;
+    border-color: #6c757d; /* Gray border for disabled */
+}
+
+/* Accessibility */
+.form-check-input:focus {
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+/* Course Table */
+#coursesTableBody tr {
+    transition: all 0.2s ease;
+}
+
+/* Undo Button */
+.btn-undo {
+    font-size: 0.875rem;
+    padding: 0.25rem 0.5rem;
+}
+
+/* Developer Tools Accordion */
+#devToolsAccordion .accordion-button {
+    font-size: 0.95rem;
+    padding: 0.75rem 1rem;
+}
+
+#devToolsAccordion .accordion-body {
+    background-color: #f8f9fa;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .selection-summary {
+        padding: 1rem;
+    }
+
+    .selection-summary .summary-item strong {
+        display: block;
+        width: 100%;
+        margin-bottom: 0.25rem;
+    }
+
+    #submitBtn {
+        min-width: 100%;
+    }
+}

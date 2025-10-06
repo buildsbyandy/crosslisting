@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}About Cross-listing - Canvas Cross-Listing Tool{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="mb-3">
+            <a href="{{ url_for('home') }}" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-left"></i> Back to Home
+            </a>
+        </div>
+
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0"><i class="bi bi-info-circle"></i> About Canvas Cross-listing</h4>
+            </div>
+            <div class="card-body">
+                <h5>What is Cross-listing?</h5>
+                <p>
+                    Cross-listing combines multiple course sections into one Canvas course shell for easier management.
+                    This allows instructors teaching the same course content across different sections to manage
+                    everything in one place.
+                </p>
+
+                <hr>
+
+                <h5>When to Use Cross-listing:</h5>
+                <ul>
+                    <li>An instructor teaches the same course content in multiple sections</li>
+                    <li>You want to combine gradebooks, announcements, and content</li>
+                    <li>Students need to see combined discussion boards and assignments</li>
+                    <li>Simplifying course management for instructors</li>
+                </ul>
+
+                <hr>
+
+                <h5>Requirements for Cross-listing:</h5>
+                <ul class="list-unstyled">
+                    <li><i class="bi bi-check-circle-fill text-success"></i> <strong>Parent Course:</strong> Must be UNPUBLISHED (no student activity yet)</li>
+                    <li><i class="bi bi-check-circle-fill text-success"></i> <strong>Child Course:</strong> Must be PUBLISHED (ready for cross-listing)</li>
+                    <li><i class="bi bi-check-circle-fill text-success"></i> <strong>Course Numbers:</strong> Must match (e.g., ENGL 1301 sections only)</li>
+                    <li><i class="bi bi-check-circle-fill text-success"></i> <strong>Different Sections:</strong> Cannot cross-list sections from same course</li>
+                    <li><i class="bi bi-check-circle-fill text-success"></i> <strong>Not Already Cross-listed:</strong> Neither section can be cross-listed already</li>
+                </ul>
+
+                <hr>
+
+                <h5>What Happens After Cross-listing:</h5>
+                <ul>
+                    <li>Child section gets merged into Parent course</li>
+                    <li>Students from child section appear in parent course</li>
+                    <li>Child course becomes inactive (content moves to parent)</li>
+                    <li>Course title shows combined sections (e.g., "Section 010, 020")</li>
+                    <li>All gradebook entries, announcements, and content are merged</li>
+                </ul>
+
+                <hr>
+
+                <h5>Canvas Validation Rules:</h5>
+                <p>
+                    The tool automatically validates all requirements before allowing cross-listing.
+                    Invalid combinations will show warnings and may be blocked if there are critical errors.
+                </p>
+
+                <hr>
+
+                <h5>Undoing Cross-listing:</h5>
+                <p>
+                    Cross-listing can be reversed using the <strong>"Undo"</strong> button in the courses table.
+                    This separates the sections back into individual courses.
+                </p>
+
+                <hr>
+
+                <h5>Best Practices:</h5>
+                <ul>
+                    <li>Always cross-list BEFORE publishing the parent course</li>
+                    <li>Ensure both sections have the same course content</li>
+                    <li>Notify students about the cross-listing change</li>
+                    <li>Check that all section-specific content is appropriate for combined sections</li>
+                </ul>
+
+                <hr>
+
+                <h5>Need Help?</h5>
+                <p class="mb-0">
+                    Contact IT Support or your Canvas administrator for assistance with complex cross-listing scenarios.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

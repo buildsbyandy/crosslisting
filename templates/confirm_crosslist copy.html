@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+
+{% block title %}Confirm Cross-listing - Canvas Cross-Listing Tool{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-10">
+        <h2 class="mb-4">
+            <i class="bi bi-exclamation-triangle-fill text-warning"></i>
+            Confirm Cross-listing Operation
+        </h2>
+
+        <!-- Section Details -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card border-success">
+                    <div class="card-header bg-success text-white">
+                        <strong>Parent Course</strong> (destination)
+                    </div>
+                    <div class="card-body">
+                        <h6>{{ parent_section.course_name }}</h6>
+                        <p class="mb-1"><strong>Course Code:</strong> {{ parent_section.course_code }}</p>
+                        <p class="mb-1"><strong>Course ID:</strong> {{ parent_section.course_id }}</p>
+                        <p class="mb-1"><strong>Published:</strong>
+                            {% if parent_section.published %}
+                                <span class="badge bg-success">Yes</span>
+                            {% else %}
+                                <span class="badge bg-secondary">No</span>
+                            {% endif %}
+                        </p>
+                        <p class="mb-0"><strong>Students:</strong> {{ parent_section.total_students or 0 }}</p>
+                        <p class="mb-0 text-muted small"><em>Parent is a course (not a section)</em></p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card border-primary">
+                    <div class="card-header bg-primary text-white">
+                        <strong>Child Section</strong> (will be merged)
+                    </div>
+                    <div class="card-body">
+                        <h6>{{ child_section.course_name }}</h6>
+                        <p class="mb-1"><strong>Course Code:</strong> {{ child_section.course_code }}</p>
+                        <p class="mb-1"><strong>Section:</strong> {{ child_section.section_name }}</p>
+                        <p class="mb-1"><strong>Course ID:</strong> {{ child_section.course_id }}</p>
+                        <p class="mb-1"><strong>Section ID:</strong> {{ child_section.section_id }}</p>
+                        <p class="mb-1"><strong>Published:</strong>
+                            {% if child_section.published %}
+                                <span class="badge bg-success">Yes</span>
+                            {% else %}
+                                <span class="badge bg-secondary">No</span>
+                            {% endif %}
+                        </p>
+                        <p class="mb-0"><strong>Students:</strong> {{ child_section.total_students or 0 }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Warnings (if any) -->
+        {% if warnings %}
+        <div class="alert alert-warning" role="alert">
+            <h5 class="alert-heading">
+                <i class="bi bi-exclamation-triangle-fill"></i>
+                Warnings - Please Review
+            </h5>
+            <hr>
+            <ul class="mb-0">
+                {% for warning in warnings %}
+                <li>{{ warning }}</li>
+                {% endfor %}
+            </ul>
+            <hr>
+            <p class="mb-0"><small>These warnings indicate potential issues. You may proceed if you have confirmed these are acceptable.</small></p>
+        </div>
+        {% endif %}
+
+        <!-- Required Acknowledgments -->
+        <form action="{{ url_for('crosslist') }}" method="post" id="crosslistForm">
+            <input type="hidden" name="parent_course_id" value="{{ parent_course_id }}">
+            <input type="hidden" name="child_section_id" value="{{ child_section_id }}">
+            <input type="hidden" name="term_id" value="{{ term_id }}">
+            <input type="hidden" name="instructor_id" value="{{ instructor_id }}">
+            <input type="hidden" name="user_name" value="{{ user_name }}">
+            <input type="hidden" name="dry_run" value="{% if dry_run %}on{% endif %}">
+            <input type="hidden" name="bypass_cache" value="{% if bypass_cache %}on{% endif %}">
+            <input type="hidden" name="override_sis" value="{% if override_sis %}on{% endif %}">
+
+            <div class="card border-danger mb-4">
+                <div class="card-header bg-danger text-white">
+                    <strong>Required Acknowledgments</strong>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted mb-3">
+                        <strong>You must check all boxes below to proceed with cross-listing.</strong>
+                    </p>
+
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="ack_approval" name="ack_approval" required>
+                        <label class="form-check-label" for="ack_approval">
+                            <strong>I have obtained approval from my dean or academic director</strong> for this cross-listing operation.
+                        </label>
+                    </div>
+
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="ack_syllabus" name="ack_syllabus" required>
+                        <label class="form-check-label" for="ack_syllabus">
+                            <strong>I acknowledge that cross-listed courses must use a Concourse syllabus</strong> and I have copied my Concourse template over before cross-listing.
+                        </label>
+                    </div>
+
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="ack_sis" name="ack_sis" required>
+                        <label class="form-check-label" for="ack_sis">
+                            <strong>I understand that cross-listing may overwrite SIS data</strong> and that this action should be performed carefully.
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Developer Tools Info (if enabled) -->
+            {% if dry_run or bypass_cache or override_sis %}
+            <div class="alert alert-info mb-4">
+                <h6><i class="bi bi-tools"></i> Developer Tools Enabled:</h6>
+                <ul class="mb-0">
+                    {% if dry_run %}<li><strong>Dry Run:</strong> No actual changes will be made</li>{% endif %}
+                    {% if bypass_cache %}<li><strong>Bypass Cache:</strong> Fresh data will be fetched</li>{% endif %}
+                    {% if override_sis %}<li><strong>Override SIS:</strong> SIS stickiness will be overridden</li>{% endif %}
+                </ul>
+            </div>
+            {% endif %}
+
+            <!-- Action Buttons -->
+            <div class="text-center">
+                <button type="submit" class="btn btn-secondary btn-lg px-5" id="confirmButton" disabled>
+                    <i class="bi bi-check-circle"></i>
+                    {% if dry_run %}
+                        Confirm Cross-list (DRY RUN)
+                    {% else %}
+                        Confirm Cross-list
+                    {% endif %}
+                </button>
+                <a href="{{ url_for('view_courses') }}?user_id={{ instructor_id }}&term_id={{ term_id }}" class="btn btn-outline-secondary btn-lg ms-3">
+                    <i class="bi bi-x-circle"></i> Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Enable submit button only when all checkboxes are checked
+// Button starts gray (btn-secondary) and turns red (btn-danger) when enabled
+document.addEventListener('DOMContentLoaded', function() {
+    const checkboxes = document.querySelectorAll('input[type="checkbox"][required]');
+    const submitButton = document.getElementById('confirmButton');
+    const form = document.getElementById('crosslistForm');
+
+    function updateButtonState() {
+        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+
+        if (allChecked) {
+            // All checked - enable and make red
+            submitButton.disabled = false;
+            submitButton.classList.remove('btn-secondary');
+            submitButton.classList.add('btn-danger');
+        } else {
+            // Not all checked - disable and make gray
+            submitButton.disabled = true;
+            submitButton.classList.remove('btn-danger');
+            submitButton.classList.add('btn-secondary');
+        }
+    }
+
+    checkboxes.forEach(cb => {
+        cb.addEventListener('change', updateButtonState);
+    });
+
+    // Initial check
+    updateButtonState();
+
+    // Handle form submission with loading modal and AJAX
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        // Show loading modal
+        showLoadingModal();
+
+        // Disable the submit button to prevent double-clicks
+        submitButton.disabled = true;
+
+        // Collect form data
+        const formData = new FormData(form);
+
+        // Minimum display time for modal (1.5 seconds)
+        const minDisplayTime = 1500;
+        const startTime = Date.now();
+
+        // Submit the form via fetch with JSON response
+        fetch(form.action, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'Accept': 'application/json'
+            }
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(data => {
+                    throw new Error(data.message || 'Network response was not ok');
+                });
+            }
+            return response.json();
+        })
+        .then(data => {
+            // Calculate remaining time to show modal
+            const elapsed = Date.now() - startTime;
+            const remainingTime = Math.max(0, minDisplayTime - elapsed);
+
+            // Wait for minimum display time, then hide modal and redirect
+            setTimeout(() => {
+                hideLoadingModal();
+
+                if (data.status === 'success') {
+                    // Success - redirect back to courses with flash message
+                    const instructorId = formData.get('instructor_id');
+                    const termId = formData.get('term_id');
+
+                    // Create a form to POST to view_courses
+                    const redirectForm = document.createElement('form');
+                    redirectForm.method = 'POST';
+                    redirectForm.action = '{{ url_for("view_courses") }}';
+
+                    const userIdInput = document.createElement('input');
+                    userIdInput.type = 'hidden';
+                    userIdInput.name = 'user_id';
+                    userIdInput.value = instructorId;
+                    redirectForm.appendChild(userIdInput);
+
+                    const termIdInput = document.createElement('input');
+                    termIdInput.type = 'hidden';
+                    termIdInput.name = 'term_id';
+                    termIdInput.value = termId;
+                    redirectForm.appendChild(termIdInput);
+
+                    const userNameInput = document.createElement('input');
+                    userNameInput.type = 'hidden';
+                    userNameInput.name = 'user_name';
+                    userNameInput.value = '';
+                    redirectForm.appendChild(userNameInput);
+
+                    const flashInput = document.createElement('input');
+                    flashInput.type = 'hidden';
+                    flashInput.name = 'flash_success';
+                    flashInput.value = data.message;
+                    redirectForm.appendChild(flashInput);
+
+                    document.body.appendChild(redirectForm);
+                    redirectForm.submit();
+                } else {
+                    // Error - show error message
+                    alert('Error: ' + data.message);
+                    submitButton.disabled = false;
+                }
+            }, remainingTime);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            hideLoadingModal();
+
+            // Re-enable submit button
+            submitButton.disabled = false;
+
+            // Show error message
+            alert('An error occurred during crosslisting: ' + error.message);
+        });
+    });
+});
+</script>
+{% endblock %}

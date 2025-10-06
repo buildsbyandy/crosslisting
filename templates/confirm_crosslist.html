@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Confirm Cross-listing</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
+    <style>
+        .warning-box {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 0.25rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .acknowledgment-box {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .loading-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+        }
+        .loading-modal.show {
+            display: flex;
+        }
+        .loading-content {
+            background: white;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            text-align: center;
+            min-width: 300px;
+        }
+        .spinner-border {
+            width: 3rem;
+            height: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">Confirm Cross-listing Operation</h1>
+
+        {% if warnings %}
+        <div class="warning-box">
+            <h4>⚠️ Warnings Detected</h4>
+            <p>The following warnings were detected. Please review carefully before proceeding:</p>
+            <ul>
+                {% for warning in warnings %}
+                <li>{{ warning }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>Cross-listing Details</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>Parent Course (Main Course)</h6>
+                        <p><strong>{{ parent_section.course_code }}</strong>: {{ parent_section.course_name }}</p>
+                        <p>Section: {{ parent_section.section_name }}</p>
+                        <p>Published: {{ parent_section.published }}</p>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>Child Section (To Be Cross-listed)</h6>
+                        <p><strong>{{ child_section.course_code }}</strong>: {{ child_section.course_name }}</p>
+                        <p>Section: {{ child_section.section_name }}</p>
+                        <p>Published: {{ child_section.published }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <form id="crosslistForm" method="POST" action="{{ url_for('crosslist') }}">
+            <!-- Hidden fields to pass data forward -->
+            <input type="hidden" name="parent_course_id" value="{{ parent_course_id }}">
+            <input type="hidden" name="child_section_id" value="{{ child_section_id }}">
+            <input type="hidden" name="term_id" value="{{ term_id }}">
+            <input type="hidden" name="instructor_id" value="{{ instructor_id }}">
+            <input type="hidden" name="user_name" value="{{ user_name }}">
+            <input type="hidden" name="term_name" value="{{ term_name }}">
+
+            <!-- Developer tools flags (if present) -->
+            {% if dry_run %}
+            <input type="hidden" name="dry_run" value="on">
+            {% endif %}
+            {% if bypass_cache %}
+            <input type="hidden" name="bypass_cache" value="on">
+            {% endif %}
+            {% if override_sis %}
+            <input type="hidden" name="override_sis" value="on">
+            {% endif %}
+
+            <div class="acknowledgment-box">
+                <h5>Required Acknowledgments</h5>
+                <p>You must acknowledge the following before proceeding with cross-listing:</p>
+
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" name="ack_approval" id="ack_approval" required>
+                    <label class="form-check-label" for="ack_approval">
+                        <strong>Instructor Approval:</strong> I have received explicit approval from the instructor
+                        to cross-list these courses, or I am the instructor of record for both courses.
+                    </label>
+                </div>
+
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" name="ack_syllabus" id="ack_syllabus" required>
+                    <label class="form-check-label" for="ack_syllabus">
+                        <strong>Syllabus Alignment:</strong> I confirm that the syllabi for these courses are
+                        compatible and appropriate for cross-listing. Students from both sections will see the
+                        same content and assignments.
+                    </label>
+                </div>
+
+                <!-- COMMENTED OUT: SIS Integration acknowledgment
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" name="ack_sis" id="ack_sis" required>
+                    <label class="form-check-label" for="ack_sis">
+                        <strong>SIS Integration:</strong> I understand that this cross-listing operation may
+                        affect SIS data integration and reporting. Grades will be properly recorded for each
+                        student's original course registration.
+                    </label>
+                </div>
+                -->
+
+                <div class="alert alert-info mt-3">
+                    <i class="bi bi-info-circle"></i>
+                    <strong>Important:</strong> Both acknowledgments must be checked to proceed.
+                    Cross-listing is a significant operation that affects course structure and student access.
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-between">
+                <a href="{{ url_for('view_courses') }}"
+                   class="btn btn-secondary"
+                   onclick="return confirm('Are you sure you want to cancel? You will need to restart the cross-listing process.');">
+                    <i class="bi bi-x-circle"></i> Cancel
+                </a>
+                <button type="submit" class="btn btn-primary btn-lg" id="confirmBtn">
+                    <i class="bi bi-check-circle"></i> Confirm and Proceed with Cross-listing
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Loading Modal -->
+    <div id="loadingModal" class="loading-modal">
+        <div class="loading-content">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-3">Processing cross-listing operation...</p>
+            <p class="text-muted">This may take a few moments.</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Show loading modal on form submit
+        document.getElementById('crosslistForm').addEventListener('submit', function(e) {
+            // Check if all required checkboxes are checked (only approval and syllabus)
+            const approval = document.getElementById('ack_approval').checked;
+            const syllabus = document.getElementById('ack_syllabus').checked;
+
+            if (!approval || !syllabus) {
+                e.preventDefault();
+                alert('Please check all required acknowledgments before proceeding.');
+                return false;
+            }
+
+            // Show loading modal
+            document.getElementById('loadingModal').classList.add('show');
+
+            // Disable submit button to prevent double submission
+            document.getElementById('confirmBtn').disabled = true;
+        });
+
+        // Enable/disable submit button based on checkbox state
+        function updateSubmitButton() {
+            const approval = document.getElementById('ack_approval').checked;
+            const syllabus = document.getElementById('ack_syllabus').checked;
+            const submitBtn = document.getElementById('confirmBtn');
+
+            // Only require approval and syllabus (ack_sis is commented out)
+            submitBtn.disabled = !(approval && syllabus);
+        }
+
+        // Add event listeners to checkboxes
+        document.getElementById('ack_approval').addEventListener('change', updateSubmitButton);
+        document.getElementById('ack_syllabus').addEventListener('change', updateSubmitButton);
+
+        // Initialize button state on page load
+        updateSubmitButton();
+    </script>
+</body>
+</html>

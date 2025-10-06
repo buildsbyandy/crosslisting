@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Error - Canvas Cross-Listing Tool{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="alert alert-danger" role="alert">
+            <h4 class="alert-heading">
+                <i class="bi bi-exclamation-triangle"></i> Error
+            </h4>
+            <p class="mb-0">{{ error }}</p>
+        </div>
+
+        <div class="text-center">
+            <a href="javascript:history.back()" class="btn btn-primary me-2">← Go Back</a>
+            <a href="{{ url_for('home') }}" class="btn btn-outline-secondary">Home</a>
+        </div>
+
+        <div class="mt-4">
+            <div class="card">
+                <div class="card-body">
+                    <h6 class="card-title">Common Issues</h6>
+                    <ul class="mb-0">
+                        <li><strong>Configuration Error:</strong> Check your environment variables (CANVAS_API_TOKEN, CANVAS_BASE_URL)</li>
+                        <li><strong>Permission Denied:</strong> Verify your API token has cross-listing permissions</li>
+                        <li><strong>Invalid Term/Course:</strong> Ensure the IDs are correct and the resources exist</li>
+                        <li><strong>Network Error:</strong> Check your internet connection and Canvas availability</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

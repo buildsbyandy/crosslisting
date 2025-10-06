@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+
+{% block title %}{{ term_name }} - Cross-Listing{% endblock %}
+
+{% block content %}
+<!-- Link to custom CSS -->
+<link rel="stylesheet" href="{{ url_for('static', filename='css/crosslisting.css') }}">
+
+<div class="row">
+    <div class="col-lg-11 mx-auto">
+        <div class="mb-3">
+            <a href="{{ url_for('home') }}" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-left"></i> New Search
+            </a>
+        </div>
+
+        <!-- Instructor Info Card -->
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">{{ term_name }}</h5>
+                <p class="mb-0"><strong>Instructor:</strong> {{ user_name }}</p>
+            </div>
+        </div>
+
+        {% if sections %}
+        <!-- Parent/Child Selection Logic:
+             - Parent radio button submits course_id (unpublished courses)
+             - Child checkbox submits section_id (published sections)
+             - JavaScript enforces parent_course_id != child_section_id
+             - validate_crosslist uses get_course(parent_course_id) and get_section(child_section_id)
+        -->
+        <form id="crosslistForm" action="{{ url_for('validate_crosslist') }}" method="post">
+            <input type="hidden" name="instructor_id" value="{{ user_id }}">
+            <input type="hidden" name="term_id" value="{{ term_id }}" id="termId">
+            <input type="hidden" name="term_name" value="{{ term_name }}">
+            <input type="hidden" name="user_name" value="{{ user_name }}">
+            <input type="hidden" data-undo-url="{{ url_for('uncrosslist') }}">
+
+            <!-- Collapsible Instructions Panel (Expanded by Default) -->
+            <div class="accordion mb-3" id="instructionsAccordion">
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingInstructions">
+                        <button class="accordion-button" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapseInstructions" aria-expanded="true" aria-controls="collapseInstructions">
+                            <i class="bi bi-info-circle"></i> &nbsp; How to Cross-list Courses
+                        </button>
+                    </h2>
+                    <div id="collapseInstructions" class="accordion-collapse collapse show" aria-labelledby="headingInstructions"
+                         data-bs-parent="#instructionsAccordion">
+                        <div class="accordion-body instructions-panel">
+                            <strong>Steps:</strong>
+                            <ol>
+                                <li>Select <strong>ONE Parent course</strong> (must be unpublished) using the radio button</li>
+                                <li>Select <strong>ONE Child section</strong> (must be published) using the checkbox</li>
+                                <li>Click "Validate & Confirm Cross-listing" to proceed</li>
+                            </ol>
+                            <p class="mb-2 text-muted"><small><strong>Note:</strong> Parent courses must be unpublished with no student activity. Child sections must be published and from a different course.</small></p>
+                            <a href="https://cougarweb.collin.edu/pages/canvas-cross-listing" target="_blank" class="btn btn-sm btn-outline-secondary">
+                                About Cross-listing
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Developer Tools Section -->
+            <div class="accordion mb-3" id="devToolsAccordion">
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingDevTools">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapseDevTools" aria-expanded="false" aria-controls="collapseDevTools">
+                            <i class="bi bi-tools"></i> &nbsp; Developer Tools (Optional)
+                        </button>
+                    </h2>
+                    <div id="collapseDevTools" class="accordion-collapse collapse" aria-labelledby="headingDevTools"
+                         data-bs-parent="#devToolsAccordion">
+                        <div class="accordion-body">
+                            <p class="text-muted small mb-3">
+                                These options are for testing and development purposes. Leave unchecked for normal operation.
+                            </p>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input" type="checkbox" id="dry_run" name="dry_run">
+                                <label class="form-check-label" for="dry_run">
+                                    <strong>Dry Run</strong> - Validate and log actions without making actual changes
+                                </label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input" type="checkbox" id="bypass_cache" name="bypass_cache">
+                                <label class="form-check-label" for="bypass_cache">
+                                    <strong>Bypass Cache</strong> - Force fresh data fetch from Canvas API
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="override_sis" name="override_sis">
+                                <label class="form-check-label" for="override_sis">
+                                    <strong>Override SIS Stickiness</strong> - Allow changes to SIS-managed data
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Course Sections Table -->
+            <div class="card mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0"><i class="bi bi-list-ul"></i> Course Sections</h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th class="parent-column" width="70">Select<br>Parent</th>
+                                    <th class="child-column" width="70">Select<br>Child</th>
+                                    <th>Course Code</th>
+                                    <th>Course Name</th>
+                                    <th>Section</th>
+                                    <th>Published</th>
+                                    <th>Students</th>
+                                    <th>Cross-listed</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="coursesTableBody">
+                                {% for section in sections %}
+                                <tr data-section-id="{{ section.section_id }}"
+                                    data-published="{{ section.published }}"
+                                    data-cross-listed="{{ section.cross_listed }}"
+                                    data-course-id="{{ section.course_id }}">
+                                    <td class="text-center">
+                                        <input type="radio" name="parent_course_id" value="{{ section.course_id }}"
+                                               class="form-check-input parent-radio"
+                                               {% if section.published == 'Yes' %}disabled title="Cannot select published course as parent"{% endif %}
+                                               aria-label="Select {{ section.course_code }} as parent">
+                                    </td>
+                                    <td class="text-center">
+                                        <input type="checkbox" name="child_section_id" value="{{ section.section_id }}"
+                                               class="form-check-input child-checkbox"
+                                               {% if section.published != 'Yes' %}disabled title="Cannot select unpublished section as child"{% endif %}
+                                               {% if section.cross_listed == 'Yes' %}disabled title="Section already cross-listed"{% endif %}
+                                               aria-label="Select {{ section.course_code }} as child">
+                                    </td>
+                                    <td>
+                                        <strong>{{ section.course_code }}</strong>
+                                        {% if section.cross_listed == 'Yes' %}
+                                        <span class="badge bg-info text-white ms-1" title="This section has been cross-listed" style="font-size: 0.75em;">
+                                            <i class="bi bi-link-45deg"></i> Cross-listed
+                                        </span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {{ section.course_name }}
+                                        {% if section.cross_listed == 'Yes' and section.nonxlist_course_id %}
+                                        <div class="small text-muted mt-1" style="font-size: 0.85em;">
+                                            <i class="bi bi-arrow-return-right"></i>
+                                            Originally from Course ID: {{ section.nonxlist_course_id }}
+                                        </div>
+                                        {% endif %}
+                                    </td>
+                                    <td><small class="text-muted">{{ section.section_name }}</small></td>
+                                    <td>
+                                        {% if section.published == 'Yes' %}
+                                        <span class="badge published-yes">Published</span>
+                                        {% else %}
+                                        <span class="badge published-no">Unpublished</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ section.total_students or 0 }}</td>
+                                    <td>
+                                        {% if section.cross_listed == 'Yes' %}
+                                        <span class="badge crosslisted-yes" style="font-size: 0.85em;">
+                                            <i class="bi bi-check-circle"></i> Yes
+                                        </span>
+                                        {% else %}
+                                        <span class="badge crosslisted-no">No</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if section.cross_listed == 'Yes' %}
+                                        <button type="button" class="btn btn-warning btn-sm btn-undo"
+                                                onclick="undoCrosslist({{ section.section_id }}, '{{ section.course_name }}', {{ user_id }})">
+                                            <i class="bi bi-arrow-counterclockwise"></i> Undo
+                                        </button>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Selection Summary Card -->
+            <div class="selection-summary">
+                <h6><i class="bi bi-clipboard-check"></i> Selection Summary</h6>
+                <div class="summary-item">
+                    <strong>Parent:</strong>
+                    <span id="summaryParent" class="none">None selected</span>
+                </div>
+                <div class="summary-item">
+                    <strong>Child:</strong>
+                    <span id="summaryChild" class="none">None selected</span>
+                </div>
+            </div>
+
+            <!-- Submit Button -->
+            <div class="text-center mb-4">
+                <button type="submit" class="btn btn-secondary btn-lg px-5" id="submitBtn" disabled>
+                    <i class="bi bi-link-45deg"></i> Select Parent and Child to Continue
+                </button>
+            </div>
+        </form>
+        {% else %}
+        <div class="alert alert-info">
+            <i class="bi bi-info-circle"></i> No sections found for this term.
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Link to custom JS -->
+<script src="{{ url_for('static', filename='js/crosslisting.js') }}"></script>
+{% endblock %}

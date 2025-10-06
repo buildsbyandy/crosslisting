@@ -78,11 +78,11 @@ class EnvTokenProvider:
         return token
 
 
-class OAuthSessionTokenProvider:
-    """Placeholder OAuth token provider - returns dummy token for now."""
-    def get_token(self) -> str:
-        # TODO: Implement OAuth flow
-        return "dummy_oauth_token"
+# class OAuthSessionTokenProvider:
+#     """Placeholder OAuth token provider - returns dummy token for now."""
+#     def get_token(self) -> str:
+#         # TODO: Implement OAuth flow
+#         return "dummy_oauth_token"
 
 
 @dataclass
@@ -159,7 +159,9 @@ class CanvasAPIClient:
         if params:
             # IMPORTANT: doseq=True encodes list params correctly (include[]=a&include[]=b)
             query_string = urllib.parse.urlencode(params, doseq=True)
-            full_path += '?' + query_string
+            # Use & if path already has ?, otherwise use ?
+            separator = '&' if '?' in full_path else '?'
+            full_path += separator + query_string
         
         # Create connection
         if parsed_url.scheme == 'https':
@@ -241,37 +243,44 @@ class CanvasAPIClient:
         """Retrieve paginated data from Canvas API with retry logic."""
         if params is None:
             params = {}
-        
-        # Set pagination parameters
-        params['per_page'] = self.config.per_page
-        
+
+        # Set pagination parameters only if not already in path
+        if 'per_page' not in path:
+            params['per_page'] = self.config.per_page
+
         all_data = []
         page = 1
         consecutive_errors = 0
         max_consecutive_errors = 3
-        
+
         # Safety limits to prevent infinite loops
         max_pages_absolute = 50  # Never fetch more than 50 pages
         seen_data_hashes = set()  # Track duplicate responses
-        
+
         while True:
             # Check page limit for testing
             if max_pages and page > max_pages:
                 logger.info(f"Reached maximum page limit ({max_pages}). Stopping pagination.")
                 break
-            
+
             # Safety check - absolute maximum
             if page > max_pages_absolute:
                 logger.warning(f"Reached absolute page limit ({max_pages_absolute}). Stopping pagination.")
                 break
-            
-            # Add page parameter
-            params['page'] = page
-            
+
+            # Add page parameter - handle both embedded and separate params
+            if params:
+                params['page'] = page
+                current_path = path
+            else:
+                # Path already has params embedded, append page parameter
+                separator = '&' if '?' in path else '?'
+                current_path = f"{path}{separator}page={page}"
+
             for attempt in range(self.config.max_retries):
                 try:
-                    logger.info(f"Fetching page {page} from {path}")
-                    response = self._make_request('GET', path, params)
+                    logger.info(f"Fetching page {page} from {current_path if not params else path}")
+                    response = self._make_request('GET', current_path if not params else path, params if params else None)
                     
                     # Handle different response formats
                     if isinstance(response, list):
@@ -505,7 +514,12 @@ def get_config() -> CanvasConfig:
 
 
 def resolve_instructor(config: CanvasConfig, term_id: int, user_key: str, token_provider: TokenProvider) -> Dict[str, Any]:
-    """Resolve instructor by id, email/login_id, SIS id, or name.
+    """Resolve instructor by SIS id, Canvas user ID, login_id, or name.
+
+    Resolution order (prioritizes SIS over Canvas ID):
+    1. SIS ID (always attempted first, even for numeric inputs)
+    2. Canvas user ID (only if SIS lookup fails and input is all digits)
+    3. Name/login search (fallback)
 
     Returns a dict with:
       - candidates: list of resolved instructor dicts (id, name, login_id, email)
@@ -521,50 +535,60 @@ def resolve_instructor(config: CanvasConfig, term_id: int, user_key: str, token_
     raw_matches = 0
 
     try:
-        # Resolution order as specified
-        if "@" in user_key:
-            # Email/login_id search - validate @collin.edu format
-            if not user_key.lower().endswith("@collin.edu"):
-                logger.warning(f"Email format should be @collin.edu, got: {user_key}")
+        # Resolution order: SIS → Canvas ID → Name/Login
 
-            path = f"/api/v1/accounts/{config.account_id}/users"
-            params = {"login_id": user_key}
-            try:
-                resp = client._make_request('GET', path, params)
-                if isinstance(resp, list) and resp:
-                    raw_matches += len(resp)
-                    candidates.extend(resp)
-            except CanvasAPIError:
-                # Fallback to search_term
-                params = {"search_term": user_key}
-                resp = client._make_request('GET', path, params)
-                if isinstance(resp, list):
-                    candidates.extend(resp)
+        # COMMENTED OUT: Email lookup (too many false positives)
+        # if "@" in user_key:
+        #     # API: GET /api/v1/accounts/{account_id}/users?login_id={user_key}
+        #     # Email/login_id search
+        #     path = f"/api/v1/accounts/{config.account_id}/users"
+        #     params = {"login_id": user_key}
+        #     try:
+        #         resp = client._make_request('GET', path, params)
+        #         if isinstance(resp, list) and resp:
+        #             raw_matches += len(resp)
+        #             candidates.extend(resp)
+        #     except CanvasAPIError:
+        #         # Fallback to search_term
+        #         # API: GET /api/v1/accounts/{account_id}/users?search_term={user_key}
+        #         params = {"search_term": user_key}
+        #         resp = client._make_request('GET', path, params)
+        #         if isinstance(resp, list):
+        #             raw_matches += len(resp)
+        #             candidates.extend(resp)
+        # else:
 
-        elif user_key.startswith("sis:") or re.match(r'^[A-Z]+[0-9]+$', user_key):
-            # SIS ID search
-            sis_id = user_key.replace("sis:", "")
-            path = f"/api/v1/users/sis_user_id:{sis_id}"
+        # Try SIS ID lookup FIRST (even for numeric inputs)
+        # API: GET /api/v1/users/sis_user_id:{sis_id}
+        sis_id = user_key.replace("sis:", "")  # Remove prefix if present
+        path = f"/api/v1/users/sis_user_id:{sis_id}"
+        sis_found = False
+        try:
+            resp = client._make_request('GET', path)
+            if resp:
+                raw_matches += 1
+                candidates.append(resp)
+                sis_found = True
+                logger.info(f"Found user via SIS ID: {sis_id}")
+        except CanvasAPIError as e:
+            logger.debug(f"SIS lookup failed for '{sis_id}': {e.message}")
+
+        # If SIS lookup failed and input is all digits, try Canvas user ID
+        if not sis_found and user_key.isdigit():
+            # API: GET /api/v1/users/{user_id}
+            path = f"/api/v1/users/{user_key}"
             try:
                 resp = client._make_request('GET', path)
                 if resp:
                     raw_matches += 1
                     candidates.append(resp)
-            except CanvasAPIError:
-                pass
+                    logger.info(f"Found user via Canvas ID: {user_key}")
+            except CanvasAPIError as e:
+                logger.debug(f"Canvas ID lookup failed for '{user_key}': {e.message}")
 
-        elif user_key.isdigit():
-            # Canvas user ID
-            path = f"/api/v1/users/{user_key}"
-            try:
-                resp = client._make_request('GET', path)
-                if resp:
-                    candidates.append(resp)
-            except CanvasAPIError:
-                pass
-
-        else:
-            # Name search
+        # If no SIS or Canvas ID match, try name/login search (unless it's clearly numeric)
+        if not candidates and not user_key.isdigit():
+            # API: GET /api/v1/accounts/{account_id}/users?search_term={user_key}
             path = f"/api/v1/accounts/{config.account_id}/users"
             params = {"search_term": user_key}
             resp = client._make_request('GET', path, params)
@@ -687,59 +711,98 @@ def list_account_courses_filtered(
         params["search_term"] = search_term
     return client.get_paginated_data(path, params, max_pages=staff_max_pages)
 
-def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider: TokenProvider, user_id: int, term_id: int) -> list[dict]:
+def get_user_courses(config: CanvasConfig, token_provider: TokenProvider, user_id: int, term_id: Optional[int] = None) -> list[dict]:
     """
-    FACULTY PATH (future GUI-ready): scope by term USING USER ENROLLMENTS, then hydrate courses in parallel.
+    Get user's courses using GET /api/v1/users/{user_id}/courses.
+    Optionally filter by term_id if provided.
+
+    Args:
+        config: Canvas configuration
+        token_provider: Token provider for authentication
+        user_id: Canvas user ID
+        term_id: Optional enrollment term ID to filter courses
+
+    Returns:
+        List of course objects with term, teachers, sections, and total_students included
     """
     client = CanvasAPIClient(token_provider, config)
-    # 1) Teacher enrollments scoped to the term
-    enroll_path = f"/api/v1/users/{user_id}/enrollments"
-    enroll_params = {
-        "type[]": "TeacherEnrollment",
-        "state[]": "active",
-        "enrollment_term_id": term_id,
-        "per_page": config.per_page
-    }
-    logger.info(f"Fetching enrollments for user {user_id} in term {term_id}")
-    # Limit pages and protect against empty/looping responses from Canvas
-    enrollments = client.get_paginated_data(enroll_path, enroll_params, max_pages=5)
-    if not enrollments:
-        logger.info("No enrollments returned; exiting early to avoid pagination loops")
+
+    # Build the correct Canvas API path: GET /api/v1/users/{user_id}/courses
+    # Include term, teachers, sections, and total_students data
+    courses_path = f"/api/v1/users/{user_id}/courses?include%5B%5D=term&include%5B%5D=teachers&include%5B%5D=sections&include%5B%5D=total_students&per_page={config.per_page}"
+
+    logger.info(f"Fetching courses for user {user_id}")
+
+    # Get all courses for this user (paginated)
+    all_courses = client.get_paginated_data(courses_path, None, max_pages=10)
+
+    if not all_courses:
+        logger.info("No courses returned for user")
         return []
-    logger.info(f"Found {len(enrollments)} enrollments")
-    course_ids = sorted({e.get("course_id") for e in enrollments if e.get("course_id")})
-    logger.info(f"Extracted {len(course_ids)} unique course IDs: {course_ids}")
 
-    # 2) Hydrate courses in parallel with ThreadPoolExecutor
-    def fetch_course(course_id: int) -> Optional[dict]:
-        try:
-            # Create a separate client for each thread to avoid shared state issues
-            thread_client = CanvasAPIClient(token_provider, config)
-            return thread_client._make_request(
-                "GET",
-                f"/api/v1/courses/{course_id}",
-                params={"include[]": ["term", "teachers", "sections", "total_students"]}
+    logger.info(f"Found {len(all_courses)} total courses for user {user_id}")
+
+    # Filter out truly orphaned courses (courses where all sections belong to other courses)
+    # This happens after cross-listing when sections are moved to another course
+    active_courses = []
+    for course in all_courses:
+        course_id = course.get('id')
+        sections = course.get('sections', [])
+
+        # Skip courses with no sections at all
+        if not sections:
+            logger.debug(f"Filtering out course {course_id} - no sections")
+            continue
+
+        # Check if ALL sections are explicitly cross-listed to OTHER courses
+        # A section is cross-listed elsewhere if:
+        # 1. It has a nonxlist_course_id (meaning it was moved)
+        # 2. The nonxlist_course_id equals THIS course_id (meaning it originated here)
+        # 3. The section's course_id is different from this course (meaning it now belongs elsewhere)
+        has_own_sections = False
+        for section in sections:
+            section_course_id = section.get('course_id')
+            nonxlist_course_id = section.get('nonxlist_course_id')
+
+            # If course_id is None/missing, treat section as belonging to parent course
+            if section_course_id is None:
+                section_course_id = course_id
+
+            # Section belongs here if: no cross-listing OR cross-listed TO here
+            belongs_here = (
+                (nonxlist_course_id is None) or  # Not cross-listed at all
+                (section_course_id == course_id)  # Cross-listed TO this course
             )
-        except CanvasAPIError as e:
-            logger.warning(f"Failed to fetch course {course_id}: {e.message}")
-            return None
 
-    courses: list[dict] = []
-    if course_ids:
-        # Limit parallel requests to avoid overwhelming the API
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            course_futures = {executor.submit(fetch_course, cid): cid for cid in course_ids}
-            for future in course_futures:
-                try:
-                    course = future.result(timeout=30)  # Add timeout
-                    if course:
-                        courses.append(course)
-                except Exception as e:
-                    logger.warning(f"Failed to get course result: {e}")
-    else:
-        logger.info("No courses found from enrollments; returning empty list")
+            if belongs_here:
+                has_own_sections = True
+                break
 
-    return courses
+        if has_own_sections:
+            # Keep the course - it has at least one section that belongs to it
+            active_courses.append(course)
+        else:
+            logger.debug(f"Filtering out orphaned course {course_id} '{course.get('name')}' - "
+                        f"all {len(sections)} sections belong to other courses")
+
+    logger.info(f"After orphan filtering: {len(active_courses)} active courses")
+
+    # Filter by enrollment_term_id if term_id is provided
+    if term_id is not None:
+        term_courses = [
+            course for course in active_courses
+            if course.get('enrollment_term_id') == term_id
+        ]
+        logger.info(f"Filtered to {len(term_courses)} courses in term {term_id}")
+        return term_courses
+
+    return active_courses
+
+
+# Keep old function name for backward compatibility, but redirect to new implementation
+def list_user_term_courses_via_enrollments(config: CanvasConfig, token_provider: TokenProvider, user_id: int, term_id: int) -> list[dict]:
+    """Deprecated: Use get_user_courses() instead."""
+    return get_user_courses(config, token_provider, user_id, term_id)
 
 def list_sections_for_courses(config: CanvasConfig, token_provider: TokenProvider, courses: list[dict]) -> list[dict]:
     """Fetch sections only for the narrowed set of courses, preferring course['sections'] when present."""
@@ -878,8 +941,8 @@ def get_course_sections(
     try:
         print(f"🔍 Fetching course sections for term {term_id}...")
         if user_id:
-            # Faculty path (scoped to term via enrollments, then hydrate)
-            courses = list_user_term_courses_via_enrollments(config, token_provider, user_id, term_id)
+            # Faculty path: Get user's courses and filter by term
+            courses = get_user_courses(config, token_provider, user_id, term_id)
         else:
             # Staff narrowing path (account-level filters)
             courses = list_account_courses_filtered(
@@ -1165,28 +1228,20 @@ def _extract_section_suffix(sis_section_id: Optional[str], section_name: Optiona
     return suffix or ''
 
 
-def _build_option_c_course_name(base_course_code: str, existing_course_name: str, parent_primary_suffix: str, child_suffixes: List[str]) -> str:
-    """Compose course name per Option C: <parent_suffix>/<child_suffixes>: <parent_course_name> prefixed by base course code.
-    - Only the primary parent section suffix is included for parent
-    - Include all child suffixes
+def build_simple_crosslist_name(parent_code: str, parent_name: str, child_code: str, child_name: str) -> str:
     """
-    # Determine course code prefix (before last '-')
-    prefix = base_course_code or ''
-    if '-' in prefix:
-        maybe_prefix, maybe_suffix = prefix.rsplit('-', 1)
-        if re.fullmatch(r'[0-9A-Z]{1,5}', (maybe_suffix or '').upper()):
-            prefix = maybe_prefix
+    Build simple cross-list name format with codes and names.
 
-    parts: List[str] = []
-    if parent_primary_suffix:
-        parts.append(parent_primary_suffix.upper())
-    # Deduplicate child suffixes and exclude if same as parent
-    child_list = [c.upper() for c in child_suffixes if c]
-    child_list = sorted({c for c in child_list if c != (parent_primary_suffix or '').upper()})
-    parts.extend(child_list)
+    Args:
+        parent_code: Parent course code (e.g., "ENGL 1301-001")
+        parent_name: Parent course name (e.g., "English Composition")
+        child_code: Child course code (e.g., "ENGL 1301-005")
+        child_name: Child course name (e.g., "English Composition")
 
-    code_part = f"{prefix}-{('/'.join(parts))}" if parts else prefix
-    return f"{code_part}: {existing_course_name}" if code_part else existing_course_name
+    Returns:
+        String in format: "ENGL 1301-001: English Composition and ENGL 1301-005: English Composition"
+    """
+    return f"{parent_code}: {parent_name} and {child_code}: {child_name}"
 
 
 def _build_children_html_list(children: List[Tuple[str, str]]) -> str:
@@ -1201,83 +1256,141 @@ def _build_children_html_list(children: List[Tuple[str, str]]) -> str:
     )
 
 
+def update_course_code_field(config: CanvasConfig, token_provider: TokenProvider, parent_course_id: int,
+                            parent_code: str, child_code: str, as_user_id: Optional[int] = None) -> bool:
+    """
+    Update the Course Code field (not Description) with cross-listing info.
+
+    Logic:
+    - Same course (ENGL 1301-001 + ENGL 1301-005): "ENGL 1301-001 / 005"
+    - Different courses (MATH 1405-001 + PHYS 2301-005): "MATH 1405-001 / PHYS 2301-005"
+
+    Args:
+        config: Canvas configuration
+        token_provider: Authentication provider
+        parent_course_id: ID of parent course
+        parent_code: Parent course code (e.g., "ENGL 1301-001")
+        child_code: Child course code (e.g., "ENGL 1301-005")
+        as_user_id: Optional user ID for masquerading
+
+    Returns:
+        Boolean indicating success
+    """
+    try:
+        # Extract base course codes (before the last dash/section number)
+        # Format: "SUBJ ####-###" where last part after dash is section
+        parent_base = parent_code.rsplit('-', 1)[0] if '-' in parent_code else parent_code
+        child_base = child_code.rsplit('-', 1)[0] if '-' in child_code else child_code
+
+        # Check if same course (same base)
+        if parent_base == child_base:
+            # Same course - extract just the section number from child
+            child_section = child_code.rsplit('-', 1)[1] if '-' in child_code else child_code
+            new_code = f"{parent_code} / {child_section}"
+        else:
+            # Different courses - use full child code
+            new_code = f"{parent_code} / {child_code}"
+
+        # Update ONLY the course code field
+        update_course_fields(config, token_provider, parent_course_id, {"course_code": new_code}, as_user_id)
+
+        logger.info(f"Updated course code to: {new_code}")
+        return True
+
+    except CanvasAPIError as e:
+        logger.error(f"Failed to update course code: {e.message}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error updating course code: {e}")
+        return False
+
+
 def apply_post_crosslist_updates(config: CanvasConfig, token_provider: TokenProvider, parent_course_id: int,
                                  as_user_id: Optional[int] = None,
                                  primary_parent_suffix: Optional[str] = None) -> Dict[str, Any]:
     """
-    After a successful cross-list, update parent course name (Option C) and syllabus child list block.
-    Returns dict with new_course_name, child_section_ids, syllabus_updated.
+    After a successful cross-list, update parent course with simple naming and course code.
+
+    Updates:
+    1. Course name using simple format: "Parent Course Name and Child Course Name"
+    2. Course Code field with section or course info (NOT Description field)
+    3. Syllabus with child course list
+
+    Returns dict with new_course_name, child_section_ids, syllabus_updated, course_code_updated.
     """
     client = CanvasAPIClient(token_provider, config, as_user_id)
 
-    # Fetch parent course details (need name, course_code, term, syllabus)
+    # Fetch parent course details
     parent_course = get_course(config, token_provider, parent_course_id, include=["syllabus_body"], as_user_id=as_user_id)
     parent_course_name = parent_course.get('name') or ''
     parent_course_code = parent_course.get('course_code') or ''
     current_syllabus = parent_course.get('syllabus_body') or ''
 
-    # Extract stored primary suffix marker if present
-    primary_marker_re = re.compile(r"<!--\s*CROSSLIST_PRIMARY_SUFFIX:\s*([0-9A-Z]{1,5})\s*-->")
-    stored_primary_suffix: Optional[str] = None
-    m = primary_marker_re.search(current_syllabus)
-    if m:
-        stored_primary_suffix = m.group(1).upper()
-
     # Fetch all sections currently in the parent course
     sections = client.get_paginated_data(f"/api/v1/courses/{parent_course_id}/sections", {"per_page": config.per_page})
 
-    parent_candidates: List[Dict[str, Any]] = []
     child_sections: List[Dict[str, Any]] = []
     child_section_ids: List[int] = []
     child_origin_course_ids: List[int] = []
 
     for s in sections or []:
         nonx = s.get('nonxlist_course_id')
-        if nonx is None or nonx == parent_course_id:
-            parent_candidates.append(s)
-        else:
+        if nonx is not None and nonx != parent_course_id:
             child_sections.append(s)
             child_section_ids.append(s.get('id'))
             if nonx:
                 child_origin_course_ids.append(nonx)
 
-    # Decide primary parent suffix per rules: stored > provided > fallback native first
-    parent_primary_suffix = (stored_primary_suffix or (primary_parent_suffix.upper() if primary_parent_suffix else ''))
-    if not parent_primary_suffix and parent_candidates:
-        primary = sorted(parent_candidates, key=lambda x: (x.get('id') or 0))[0]
-        parent_primary_suffix = _extract_section_suffix(primary.get('sis_section_id'), primary.get('name')).upper()
-
-    # Build child suffix list
-    child_suffixes: List[str] = []
-    for s in child_sections:
-        child_suffixes.append(_extract_section_suffix(s.get('sis_section_id'), s.get('name')))
-
-    # Build new course name
-    new_course_name = _build_option_c_course_name(parent_course_code, parent_course_name, parent_primary_suffix, child_suffixes)
-
-    # Update course name if changed
-    if new_course_name and new_course_name != parent_course_name:
-        update_course_fields(config, token_provider, parent_course_id, {"name": new_course_name}, as_user_id)
-
-    # Build syllabus children list (fetch child origin course details)
+    # Fetch child origin course details
     children_display: List[Tuple[str, str]] = []
-    for ocid in sorted({cid for cid in child_origin_course_ids if cid}):
-        try:
-            child_course = get_course(config, token_provider, ocid, include=None, as_user_id=as_user_id)
-            code = child_course.get('course_code') or ''
-            name = child_course.get('name') or ''
-            children_display.append((code, name))
-        except CanvasAPIError:
-            continue
+    new_course_name = parent_course_name
+    course_code_updated = False
 
-    # Prepare syllabus block
+    # Process first child course (for naming and course code)
+    if child_origin_course_ids:
+        first_child_id = sorted(set(child_origin_course_ids))[0]
+        try:
+            child_course = get_course(config, token_provider, first_child_id, include=None, as_user_id=as_user_id)
+            child_name = child_course.get('name') or ''
+            child_code = child_course.get('course_code') or ''
+
+            # Build simple course name: "ENGL 1301-001: English Composition and ENGL 1301-005: English Composition"
+            new_course_name = build_simple_crosslist_name(parent_course_code, parent_course_name,
+                                                         child_code, child_name)
+
+            # Update course name if changed
+            if new_course_name != parent_course_name:
+                update_course_fields(config, token_provider, parent_course_id, {"name": new_course_name}, as_user_id)
+                logger.info(f"Updated course name to: {new_course_name}")
+
+            # Update course code field: "ENGL 1301-001 / ENGL 1301-005"
+            course_code_updated = update_course_code_field(config, token_provider, parent_course_id,
+                                                          parent_course_code, child_code, as_user_id)
+
+            children_display.append((child_code, child_name))
+
+        except CanvasAPIError as e:
+            logger.error(f"Failed to fetch child course {first_child_id}: {e.message}")
+
+        # Collect remaining child courses for syllabus
+        for ocid in sorted(set(child_origin_course_ids)):
+            if ocid != first_child_id:
+                try:
+                    child_course = get_course(config, token_provider, ocid, include=None, as_user_id=as_user_id)
+                    child_code = child_course.get('course_code') or ''
+                    child_name = child_course.get('name') or ''
+                    children_display.append((child_code, child_name))
+                except CanvasAPIError:
+                    continue
+
+    # Update syllabus with child course list
     html_block = _build_children_html_list(children_display)
     header_block = "<hr>\n<h3>Cross-listed Child Courses</h3>\n"
 
-    # Replace existing block between markers if present, else append header + block and persist primary marker
     start_marker = "<!-- CROSSLIST_CHILDREN -->"
     end_marker = "<!-- END_CROSSLIST_CHILDREN -->"
     syllabus_updated = False
+
     if start_marker in current_syllabus and end_marker in current_syllabus:
         pattern = re.compile(r"<!-- CROSSLIST_CHILDREN -->[\s\S]*?<!-- END_CROSSLIST_CHILDREN -->", re.MULTILINE)
         new_syllabus = pattern.sub(html_block, current_syllabus)
@@ -1286,15 +1399,15 @@ def apply_post_crosslist_updates(config: CanvasConfig, token_provider: TokenProv
             syllabus_updated = True
     else:
         sep = "\n\n" if current_syllabus and not current_syllabus.endswith("\n") else "\n"
-        primary_marker_str = f"<!-- CROSSLIST_PRIMARY_SUFFIX: {parent_primary_suffix} -->\n" if parent_primary_suffix else ""
-        new_syllabus = (current_syllabus or '') + sep + primary_marker_str + header_block + html_block
+        new_syllabus = (current_syllabus or '') + sep + header_block + html_block
         update_course_fields(config, token_provider, parent_course_id, {"syllabus_body": new_syllabus}, as_user_id)
         syllabus_updated = True
 
     return {
         "new_course_name": new_course_name,
         "child_section_ids": child_section_ids,
-        "syllabus_updated": syllabus_updated
+        "syllabus_updated": syllabus_updated,
+        "course_code_updated": course_code_updated
     }
 
 
@@ -1606,6 +1719,21 @@ class CrosslistingService:
 def main():
     """Main function to run the instructor-first cross-listing tool."""
     import argparse
+    import signal
+    import sys
+
+    def signal_handler(signum, frame):
+        """Handle shutdown signals gracefully."""
+        print(f"\nReceived interrupt signal, shutting down gracefully...")
+        sys.exit(0)
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+
+    # On Windows, also handle Ctrl+Break
+    if hasattr(signal, 'SIGBREAK'):
+        signal.signal(signal.SIGBREAK, signal_handler)
 
     parser = argparse.ArgumentParser(description='Canvas Cross-Listing Tool')
     parser.add_argument('--no_cache', action='store_true', help='Bypass cache')
@@ -1617,6 +1745,7 @@ def main():
     print("=" * 60)
     print("Canvas LMS - Cross-Listing Tool (Instructor-First)")
     print("=" * 60)
+    print("Press Ctrl+C to exit gracefully at any time")
 
     # Load configuration
     try:

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Select Instructor - Canvas Cross-Listing Tool{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <h2>Multiple Instructors Found</h2>
+        <p class="text-muted">Multiple instructors match "{{ original_instructor }}". Please select the correct one:</p>
+
+        <form action="{{ url_for('instructor_select') }}" method="post">
+            <input type="hidden" name="term_id" value="{{ term.id }}">
+            <input type="hidden" name="search_term" value="{{ search_term }}">
+
+            <div class="list-group mb-4">
+                {% for candidate in candidates %}
+                <label class="list-group-item list-group-item-action">
+                    <input class="form-check-input me-2" type="radio" name="instructor_id" value="{{ candidate.id }}" required>
+                    <div>
+                        <strong>{{ candidate.name }}</strong>
+                        <br>
+                        <small class="text-muted">
+                            Email: {{ candidate.email or 'N/A' }} |
+                            Login: {{ candidate.login_id or 'N/A' }} |
+                            ID: {{ candidate.id }}
+                        </small>
+                    </div>
+                </label>
+                {% endfor %}
+            </div>
+
+            <div class="text-center">
+                <button type="submit" class="btn btn-primary">Continue with Selected Instructor</button>
+                <a href="{{ url_for('terms') }}" class="btn btn-outline-secondary ms-2">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

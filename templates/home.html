@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Canvas Cross-Listing Tool{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-6 mx-auto">
+        <div class="text-center mb-5">
+            <h1 class="display-4">Canvas Cross-Listing Tool</h1>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title mb-2">
+                    <i class="bi bi-person-search"></i> Find Instructor
+                </h5>
+
+                <form action="{{ url_for('lookup_instructor') }}" method="post">
+                    <div class="mb-3">
+                        <input type="text" class="form-control" id="instructor" name="instructor" required
+                               placeholder="SIS ID, Canvas username, or Canvas ID"
+                               autofocus>
+                        <div class="form-text">
+                            Enter the instructor's SIS ID, Canvas username (login), or Canvas user ID
+                        </div>
+                    </div>
+
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <i class="bi bi-search"></i> Lookup Instructor
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-body">
+                <h6 class="card-title">
+                    <i class="bi bi-info-circle"></i> How Cross-listing Works
+                </h6>
+                <p class="card-text small mb-2">
+                    Cross-listing combines multiple course sections into one Canvas course shell.
+                </p>
+                <div class="text-center">
+                    <a href="https://cougarweb.collin.edu/pages/canvas-cross-listing" target="_blank" class="btn btn-sm btn-outline-secondary">
+                        Learn More
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

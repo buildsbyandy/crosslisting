@@ -1,1 +1,10 @@
 .env
+screenshots/
+logs/
+cache/
+debug_crosslisting.py
+GUI_Restrictions_Analysis.md
+samplescript/
+test_api_fix.py
+test_app.py
+test_shutdown.py
